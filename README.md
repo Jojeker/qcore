@@ -1,4 +1,6 @@
-# QCore
+<h1 align="center" style="border-bottom: none">
+ <img src="docs/images/monolith.jpg" alt="drawing" width="200"/><br>QCore
+</h1> 
 
 QCore is an ultra-compact 5G Core, designed to minimise compute and power cost.  Its goal is to cater for small, data-only 5G networks in remote locations where weight and power are critical factors: 5G in a backpack / on a drone / in space.
 
