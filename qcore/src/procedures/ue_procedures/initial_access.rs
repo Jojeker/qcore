@@ -1,23 +1,24 @@
 //! initial_access - procedure in which UE makes first contact with the 5G core
 
 use super::{HandlerApi, UeProcedure};
-use crate::SimCreds;
+use crate::SubscriberAuthParams;
 use crate::expect_nas;
 use crate::nas::parse::MobileIdentity;
+use crate::protocols::nas::FGMM_CAUSE_SYNCH_FAILURE;
 use anyhow::{Result, anyhow, bail};
 use asn1_per::SerDes;
 use derive_deref::{Deref, DerefMut};
 use f1ap::{DuToCuRrcContainer, InitialUlRrcMessageTransfer, SrbId};
 use oxirush_nas::messages::{
-    NasAuthenticationResponse, NasRegistrationRequest, NasSecurityModeComplete,
+    NasAuthenticationFailure, NasAuthenticationResponse, NasRegistrationRequest,
+    NasSecurityModeComplete,
 };
 use oxirush_nas::{Nas5gmmMessage, Nas5gsMessage, NasUeSecurityCapability};
-use rrc::UlDcchMessage;
 use rrc::{
     C1_4, C1_6, CriticalExtensions22, RrcSetupComplete, RrcSetupRequest, UlCcchMessage,
-    UlCcchMessageType, UlDcchMessageType,
+    UlCcchMessageType, UlDcchMessage, UlDcchMessageType,
 };
-use security::Challenge;
+use security::{Challenge, resync_sqn};
 use slog::{info, warn};
 
 #[derive(Deref, DerefMut)]
@@ -55,17 +56,114 @@ impl<'a, A: HandlerApi> InitialAccessProcedure<'a, A> {
     }
 
     async fn authenticate_ue(&mut self, imsi: &String) -> Result<[u8; 32]> {
-        let Some(sim) = self.lookup_sim(&imsi) else {
+        let Some(auth_params) = self.lookup_subscriber_auth_params(&imsi).await else {
             bail!("Unknown IMSI {} tried to register", imsi)
         };
-        let challenge = self.generate_challenge(sim);
+
+        for _ in 0..2 {
+            match self.perform_nas_auth(&auth_params).await? {
+                NasAuthOutcome::Kseaf(kseaf) => {
+                    self.inc_subscriber_sqn(&imsi).await?;
+                    return Ok(security::derive_kamf(&kseaf, imsi.as_bytes()));
+                }
+                NasAuthOutcome::ResyncSqn(sqn) => {
+                    self.resync_subscriber_sqn(&imsi, sqn).await?;
+                }
+            }
+            // Getting here means we have resynchronized the SQN
+        }
+        bail!("Successive synch failure during NAS authentication")
+    }
+
+    // Returns Ok(kseaf) on success, Ok(None) on synch failure, and Err for anything else.
+    async fn perform_nas_auth(
+        &mut self,
+        auth_params: &SubscriberAuthParams,
+    ) -> Result<NasAuthOutcome> {
+        let challenge = self.generate_challenge(auth_params);
+
+        // println!("Challenge generated:");
+        // println!("SQN:      {:02x?}", self.ue.sqn);
+        // println!("K:        {:02x?}", sim.ki);
+        // println!("OPC:      {:02x?}", sim.opc);
+        // println!("rand:     {:02x?}", challenge.rand);
+        // println!("autn:     {:02x?}", challenge.autn);
+        // println!("xresstar: {:02x?}", challenge.xres_star);
+        // println!("kseaf:    {:02x?}", challenge.kseaf);
+        // println!("ak:       {:02x?}", challenge.ak);
+
         let r = crate::nas::build::authentication_request(&challenge.rand, &challenge.autn);
         self.log_message("<< NasAuthenticationRequest");
-        let response = expect_nas!(AuthenticationResponse, self.nas_request(r).await?)?;
-        self.log_message(">> NasAuthenticationResponse");
-        self.check_authentication_response(response, &challenge)?;
-        let kamf = security::derive_kamf(&challenge.kseaf, imsi.as_bytes());
-        Ok(kamf)
+
+        let response = self.nas_request(r).await?;
+        match response {
+            Nas5gsMessage::Gmm(_header, Nas5gmmMessage::AuthenticationResponse(response)) => {
+                self.log_message(">> NasAuthenticationResponse");
+                self.check_authentication_response(response, &challenge)?;
+                Ok(NasAuthOutcome::Kseaf(challenge.kseaf))
+            }
+            Nas5gsMessage::Gmm(_header, Nas5gmmMessage::AuthenticationFailure(m)) => {
+                let sqn =
+                    self.process_nas_authentication_failure(m, auth_params, &challenge.rand)?;
+                // None indicates to the caller that we resync'd the SQN.
+                Ok(NasAuthOutcome::ResyncSqn(sqn))
+            }
+            m => bail!(
+                "Expected NasAuthenticationResponse/NasAuthenticationFailure but got {:?}",
+                m
+            ),
+        }
+    }
+
+    fn process_nas_authentication_failure(
+        &mut self,
+        m: NasAuthenticationFailure,
+        auth_params: &SubscriberAuthParams,
+        rand: &[u8; 16],
+    ) -> Result<[u8; 6]> {
+        let NasAuthenticationFailure {
+            fgmm_cause,
+            authentication_failure_parameter,
+        } = m;
+        self.log_message(">> NasAuthenticationFailure");
+
+        if fgmm_cause.value != FGMM_CAUSE_SYNCH_FAILURE {
+            bail!("UE failed authentication with cause {:?}", fgmm_cause);
+        }
+        let Some(auts) = authentication_failure_parameter else {
+            bail!("Missing authentication failure parameter on NAS authentication synch failure");
+        };
+        let Ok(auts) = auts.value.try_into() else {
+            bail!(
+                "Bad authentication failure parameter length on NAS authentication synch failure",
+            );
+        };
+        // println!("AUTS calculation inputs:");
+        // println!("auts:     {:x?}", auts);
+
+        match resync_sqn(
+            &auts,
+            &auth_params.sim_creds.ki,
+            &auth_params.sim_creds.opc,
+            rand,
+        ) {
+            Ok(new_sqn) => {
+                info!(self.logger, "Resynchronized SQN");
+                // println!("sqn-ms:    {:x?}", new_sqn);
+                Ok(new_sqn)
+            }
+            Err(_) => {
+                if self.config().skip_ue_authentication_check {
+                    warn!(
+                        self.logger,
+                        "Ignoring AUTS MAC-S signature failure for testability reasons"
+                    );
+                    Ok(auth_params.sqn)
+                } else {
+                    bail!("Invalid AUTS signature on NAS authentication synch failure")
+                }
+            }
+        }
     }
 
     async fn activate_nas_security(
@@ -158,16 +256,13 @@ impl<'a, A: HandlerApi> InitialAccessProcedure<'a, A> {
         Ok((imsi, ue_security_capability))
     }
 
-    fn generate_challenge(&self, sim: &SimCreds) -> Challenge {
-        let mut sqn = [0, 0, 0, 0, 0, 0];
+    fn generate_challenge(&self, auth_params: &SubscriberAuthParams) -> Challenge {
         let challenge = security::generate_challenge(
-            &sim.ki,
-            &sim.opc,
+            &auth_params.sim_creds.ki,
+            &auth_params.sim_creds.opc,
             self.config().serving_network_name.as_bytes(),
-            &mut sqn,
+            &auth_params.sqn,
         );
-        // TODO: handle SQN properly
-        //self.increment_sim_sqn(sim);
         challenge
     }
 
@@ -247,4 +342,9 @@ impl<'a, A: HandlerApi> InitialAccessProcedure<'a, A> {
         // Tell the PDCP layer to add NIA2 integrity protection henceforth.
         self.ue.pdcp_tx.enable_security(krrcint);
     }
+}
+
+enum NasAuthOutcome {
+    Kseaf([u8; 32]),
+    ResyncSqn([u8; 6]),
 }

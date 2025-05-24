@@ -234,4 +234,15 @@ impl<'a> MockUe<'a> {
     pub async fn recv_f1u_data_packet(&self) -> Result<Vec<u8>> {
         self.du.recv_f1u_data_packet(&self.du_ue_context).await
     }
+
+    pub async fn handle_nas_authentication_sync_failure(&mut self) -> Result<()> {
+        let _nas_authentication_request = self.receive_nas().await?;
+        info!(&self.logger, "NAS Authentication request <<");
+        let nas_authentication_failure = build_nas::authentication_failure()?;
+        info!(
+            &self.logger,
+            "NAS Authentication failure (synch failure) >>"
+        );
+        self.send_nas(nas_authentication_failure).await
+    }
 }
