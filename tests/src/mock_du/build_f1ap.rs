@@ -6,31 +6,37 @@ use xxap::{GtpTunnel, TransportLayerAddress};
 
 use super::UeContext;
 
-pub fn f1_setup_request() -> F1apPdu {
-    F1apPdu::InitiatingMessage(InitiatingMessage::F1SetupRequest(F1SetupRequest {
-        transaction_id: TransactionId(0),
-        gnb_du_id: GnbDuId(123),
-        gnb_du_rrc_version: RrcVersion {
-            latest_rrc_version: bitvec![u8, Msb0;0, 0, 0],
-            latest_rrc_version_enhanced: None,
-        },
-        gnb_du_name: None,
-        gnb_du_served_cells_list: None,
-        transport_layer_address_info: None,
-        bap_address: None,
-        extended_gnb_cu_name: None,
-    }))
+pub fn f1_setup_request() -> Box<F1apPdu> {
+    Box::new(F1apPdu::InitiatingMessage(
+        InitiatingMessage::F1SetupRequest(F1SetupRequest {
+            transaction_id: TransactionId(0),
+            gnb_du_id: GnbDuId(123),
+            gnb_du_rrc_version: RrcVersion {
+                latest_rrc_version: bitvec![u8, Msb0;0, 0, 0],
+                latest_rrc_version_enhanced: None,
+            },
+            gnb_du_name: None,
+            gnb_du_served_cells_list: None,
+            transport_layer_address_info: None,
+            bap_address: None,
+            extended_gnb_du_name: None,
+            rrc_terminating_iab_donor_gnb_id: None,
+            mobile_iab_mt_user_location_information: None,
+        }),
+    ))
 }
 
-pub fn f1_removal_request() -> F1apPdu {
-    F1apPdu::InitiatingMessage(InitiatingMessage::F1RemovalRequest(F1RemovalRequest {
-        transaction_id: TransactionId(0),
-    }))
+pub fn f1_removal_request() -> Box<F1apPdu> {
+    Box::new(F1apPdu::InitiatingMessage(
+        InitiatingMessage::F1RemovalRequest(F1RemovalRequest {
+            transaction_id: TransactionId(0),
+        }),
+    ))
 }
 
-pub fn initial_ul_rrc_message_transfer(gnb_du_ue_f1ap_id: u32, rrc_bytes: Vec<u8>) -> F1apPdu {
-    F1apPdu::InitiatingMessage(InitiatingMessage::InitialUlRrcMessageTransfer(
-        InitialUlRrcMessageTransfer {
+pub fn initial_ul_rrc_message_transfer(gnb_du_ue_f1ap_id: u32, rrc_bytes: Vec<u8>) -> Box<F1apPdu> {
+    Box::new(F1apPdu::InitiatingMessage(
+        InitiatingMessage::InitialUlRrcMessageTransfer(InitialUlRrcMessageTransfer {
             gnb_du_ue_f1ap_id: GnbDuUeF1apId(gnb_du_ue_f1ap_id),
             nr_cgi: NrCgi {
                 plmn_identity: PlmnIdentity([0, 1, 2]),
@@ -40,10 +46,14 @@ pub fn initial_ul_rrc_message_transfer(gnb_du_ue_f1ap_id: u32, rrc_bytes: Vec<u8
             rrc_container: RrcContainer(rrc_bytes),
             du_to_cu_rrc_container: Some(make_du_to_cu_rrc_container()),
             sul_access_indication: None,
-            transaction_id: Some(TransactionId(1)), // Should be mandatory - ODU ORAN interop hack
+            transaction_id: TransactionId(1), // Needs to be made optional for ODU ORAN interop?
             ran_ue_id: None,
             rrc_container_rrc_setup_complete: None,
-        },
+            nr_red_cap_ue_indication: None,
+            sdt_information: None,
+            sidelink_relay_configuration: None,
+            nr_e_red_cap_ue_indication: None,
+        }),
     ))
 }
 
@@ -51,32 +61,46 @@ pub fn ul_rrc_message_transfer(
     gnb_cu_ue_f1ap_id: GnbCuUeF1apId,
     gnb_du_ue_f1ap_id: u32,
     pdcp_pdu_bytes: Vec<u8>,
-) -> F1apPdu {
-    F1apPdu::InitiatingMessage(InitiatingMessage::UlRrcMessageTransfer(
-        UlRrcMessageTransfer {
+) -> Box<F1apPdu> {
+    Box::new(F1apPdu::InitiatingMessage(
+        InitiatingMessage::UlRrcMessageTransfer(UlRrcMessageTransfer {
             gnb_cu_ue_f1ap_id,
             gnb_du_ue_f1ap_id: GnbDuUeF1apId(gnb_du_ue_f1ap_id),
             srb_id: SrbId(1),
             rrc_container: RrcContainer(pdcp_pdu_bytes),
             selected_plmn_id: None,
             new_gnb_du_ue_f1ap_id: None,
-        },
+        }),
     ))
 }
 
-pub fn ue_context_setup_response(ue: &UeContext, local_ip: &String) -> Result<F1apPdu> {
+pub fn ue_context_release_complete(
+    gnb_cu_ue_f1ap_id: GnbCuUeF1apId,
+    gnb_du_ue_f1ap_id: GnbDuUeF1apId,
+) -> Box<F1apPdu> {
+    Box::new(F1apPdu::SuccessfulOutcome(
+        SuccessfulOutcome::UeContextReleaseComplete(UeContextReleaseComplete {
+            gnb_cu_ue_f1ap_id,
+            gnb_du_ue_f1ap_id,
+            criticality_diagnostics: None,
+            recommended_ss_bs_for_paging_list: None,
+        }),
+    ))
+}
+
+pub fn ue_context_setup_response(ue: &UeContext, local_ip: &String) -> Result<Box<F1apPdu>> {
     let Some(gnb_cu_ue_f1ap_id) = ue.gnb_cu_ue_f1ap_id else {
         bail!("CU F1AP ID should be set on UE");
     };
     let Some(drb) = &ue.drb else {
         bail!("Drb should be set on UE");
     };
-    let cell_group_config = f1ap::CellGroupConfig(make_rrc_cell_group_config().into_bytes()?);
+    let cell_group_config = f1ap::CellGroupConfig(make_rrc_cell_group_config().as_bytes()?);
     let transport_layer_address = TransportLayerAddress::try_from(local_ip)?;
 
     // TODO: confirm setup of SRB2
 
-    Ok(F1apPdu::SuccessfulOutcome(
+    Ok(Box::new(F1apPdu::SuccessfulOutcome(
         SuccessfulOutcome::UeContextSetupResponse(UeContextSetupResponse {
             gnb_cu_ue_f1ap_id,
             gnb_du_ue_f1ap_id: GnbDuUeF1apId(ue.ue_id),
@@ -98,6 +122,16 @@ pub fn ue_context_setup_response(ue: &UeContext, local_ip: &String) -> Result<F1
                 sl_phy_mac_rlc_config: None,
                 sl_config_dedicated_eutra_info: None,
                 requested_p_max_fr2: None,
+                sdt_mac_phy_cg_config: None,
+                musim_gap_config: None,
+                sl_rlc_channel_to_add_mod_list: None,
+                inter_frequency_config_no_gap: None,
+                ul_gap_fr2_config: None,
+                two_phr_mode_mcg: None,
+                two_phr_mode_scg: None,
+                ncd_ssb_red_cap_initial_bwp_sdt: None,
+                serv_cell_info_list: None,
+                sl_phy_mac_rlc_config_ext: None,
             },
             c_rnti: None,
             resource_coordination_transfer_container: None,
@@ -115,6 +149,8 @@ pub fn ue_context_setup_response(ue: &UeContext, local_ip: &String) -> Result<F1
                 ]),
                 additional_pdcp_duplication_tnl_list: None,
                 current_qos_para_set_index: None,
+                tsc_traffic_characteristics_feedback: None,
+                ecn_markingor_congestion_information_reporting_status: None
             }])),
             srbs_failed_to_be_setup_list: None,
             drbs_failed_to_be_setup_list: None,
@@ -127,35 +163,50 @@ pub fn ue_context_setup_response(ue: &UeContext, local_ip: &String) -> Result<F1
             sl_drbs_setup_list: None,
             sl_drbs_failed_to_be_setup_list: None,
             requested_target_cell_global_id: None,
+            scg_activation_status: None,
+            uu_rlc_channel_setup_list: None,
+            uu_rlc_channel_failed_to_be_setup_list: None,
+            pc5rlc_channel_setup_list: None,
+            pc5rlc_channel_failed_to_be_setup_list: None,
+            serving_cell_mo_encoded_in_cgc_list: None,
+            ue_multicast_mr_bs_setupnew_list: None,
+            dedicated_si_delivery_indication: None,
+            configured_bwp_list: None,
+            early_sync_information: None,
+            ltm_configuration: None,
+            s_cpac_configuration: None,
         }),
-    ))
+    )))
 }
 
 pub fn build_gnb_cu_configuration_update_acknowledge(
     transaction_id: TransactionId,
     transport_layer_address: TransportLayerAddress,
-) -> F1apPdu {
-    F1apPdu::SuccessfulOutcome(SuccessfulOutcome::GnbCuConfigurationUpdateAcknowledge(
-        GnbCuConfigurationUpdateAcknowledge {
-            transaction_id,
-            cells_failed_to_be_activated_list: None,
-            criticality_diagnostics: None,
-            gnb_cu_tnl_association_setup_list: Some(GnbCuTnlAssociationSetupList(nonempty![
-                GnbCuTnlAssociationSetupItem {
-                    tnl_association_transport_layer_address:
-                        CpTransportLayerAddress::EndpointIpAddress(transport_layer_address),
-                },
-            ])),
-            gnb_cu_tnl_association_failed_to_setup_list: None,
-            dedicated_si_delivery_needed_ue_list: None,
-            transport_layer_address_info: None,
-        },
+) -> Box<F1apPdu> {
+    Box::new(F1apPdu::SuccessfulOutcome(
+        SuccessfulOutcome::GnbCuConfigurationUpdateAcknowledge(
+            GnbCuConfigurationUpdateAcknowledge {
+                transaction_id,
+                cells_failed_to_be_activated_list: None,
+                criticality_diagnostics: None,
+                gnb_cu_tnl_association_setup_list: Some(GnbCuTnlAssociationSetupList(nonempty![
+                    GnbCuTnlAssociationSetupItem {
+                        tnl_association_transport_layer_address:
+                            CpTransportLayerAddress::EndpointIpAddress(transport_layer_address),
+                    },
+                ])),
+                gnb_cu_tnl_association_failed_to_setup_list: None,
+                dedicated_si_delivery_needed_ue_list: None,
+                transport_layer_address_info: None,
+                cells_with_ss_bs_activated_list: None,
+            },
+        ),
     ))
 }
 
-pub fn gnb_du_configuration_update() -> F1apPdu {
-    F1apPdu::InitiatingMessage(InitiatingMessage::GnbDuConfigurationUpdate(
-        GnbDuConfigurationUpdate {
+pub fn gnb_du_configuration_update() -> Box<F1apPdu> {
+    Box::new(F1apPdu::InitiatingMessage(
+        InitiatingMessage::GnbDuConfigurationUpdate(GnbDuConfigurationUpdate {
             transaction_id: TransactionId(1),
             served_cells_to_add_list: None,
             served_cells_to_modify_list: None,
@@ -165,21 +216,27 @@ pub fn gnb_du_configuration_update() -> F1apPdu {
             gnb_du_id: None,
             gnb_du_tnl_association_to_remove_list: None,
             transport_layer_address_info: None,
-        },
+            coverage_modification_notification: None,
+            gnb_du_name: None,
+            extended_gnb_du_name: None,
+            rrc_terminating_iab_donor_related_info: None,
+            mobile_iab_mt_user_location_information: None,
+        }),
     ))
 }
 
-pub fn ue_context_release_request(ue: &UeContext) -> F1apPdu {
+pub fn ue_context_release_request(ue: &UeContext) -> Box<F1apPdu> {
     let Some(gnb_cu_ue_f1ap_id) = ue.gnb_cu_ue_f1ap_id else {
         panic!("CU F1AP ID should be set on UE");
     };
-    F1apPdu::InitiatingMessage(InitiatingMessage::UeContextReleaseRequest(
-        UeContextReleaseRequest {
+    Box::new(F1apPdu::InitiatingMessage(
+        InitiatingMessage::UeContextReleaseRequest(UeContextReleaseRequest {
             gnb_cu_ue_f1ap_id,
             gnb_du_ue_f1ap_id: GnbDuUeF1apId(ue.ue_id),
             cause: Cause::RadioNetwork(CauseRadioNetwork::RlFailureRlc),
             target_cells_to_cancel: None,
-        },
+            ltm_cells_to_be_released_list: None,
+        }),
     ))
 }
 
@@ -198,6 +255,6 @@ fn make_rrc_cell_group_config() -> rrc::CellGroupConfig {
 
 fn make_du_to_cu_rrc_container() -> DuToCuRrcContainer {
     // We also need a CellGroupConfig to give to the CU.
-    let cell_group_config_ie = make_rrc_cell_group_config().into_bytes().unwrap();
+    let cell_group_config_ie = make_rrc_cell_group_config().as_bytes().unwrap();
     DuToCuRrcContainer(cell_group_config_ie)
 }

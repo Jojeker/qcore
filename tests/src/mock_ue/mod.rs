@@ -13,9 +13,11 @@ use crate::{DuUeContext, MockDu};
 
 pub struct MockUe<'a> {
     imsi: String,
+    guti: Option<[u8; 10]>,
     du: &'a MockDu,
     pub du_ue_context: DuUeContext,
     pub ipv4_addr: Ipv4Addr,
+    dnn: Option<&'static [u8]>,
     logger: Logger,
 }
 
@@ -29,11 +31,21 @@ impl<'a> MockUe<'a> {
     ) -> Result<Self> {
         Ok(MockUe {
             imsi,
+            guti: None,
             du,
             du_ue_context: du.new_ue_context(ue_id, cu_ip_addr).await?,
             ipv4_addr: Ipv4Addr::UNSPECIFIED,
+            dnn: None,
             logger: logger.new(o!("ue" => ue_id)),
         })
+    }
+
+    pub fn use_guti(&mut self, guti: [u8; 10]) {
+        self.guti = Some(guti);
+    }
+
+    pub fn use_dnn(&mut self, dnn: &'static [u8]) {
+        self.dnn = Some(dnn);
     }
 
     pub async fn perform_rrc_setup(&mut self) -> Result<()> {
@@ -42,11 +54,13 @@ impl<'a> MockUe<'a> {
             .send_initial_ul_rrc(&self.du_ue_context, rrc_setup_request)
             .await?;
         let message = self.du.receive_rrc_dl_ccch(&mut self.du_ue_context).await?;
-        let DlCcchMessageType::C1(C1_1::RrcSetup(rrc_setup)) = message else {
+        let DlCcchMessageType::C1(C1_1::RrcSetup(rrc_setup)) = *message else {
             bail!("Unexpected RRC message {:?}", message)
         };
         info!(&self.logger, "DlRrcMessageTransfer(RrcSetup) <<");
-        let registration_request = build_nas::registration_request(&self.imsi)?;
+
+        // This currently assumes that the UE wants to register.
+        let registration_request = self.build_register_request()?;
         let rrc_setup_complete =
             build_rrc::setup_complete(rrc_setup.rrc_transaction_identifier, registration_request);
         info!(
@@ -54,8 +68,21 @@ impl<'a> MockUe<'a> {
             "Rrc SetupComplete + NAS Registration Request >>"
         );
         self.du
-            .send_ul_rrc(&mut self.du_ue_context, rrc_setup_complete)
+            .send_ul_rrc(&mut self.du_ue_context, &rrc_setup_complete)
             .await
+    }
+
+    fn build_register_request(&self) -> Result<Vec<u8>> {
+        if let Some(guti) = self.guti {
+            build_nas::registration_request(build_nas::mobile_identity_guti(&guti))
+        } else {
+            build_nas::registration_request(build_nas::mobile_identity_supi(&self.imsi))
+        }
+    }
+
+    // Register outside of an RRC Setup Complete on an existing RRC channel
+    pub async fn reregister(&mut self) -> Result<()> {
+        self.send_nas(self.build_register_request()?).await
     }
 
     pub async fn handle_nas_authentication(&mut self) -> Result<()> {
@@ -76,29 +103,45 @@ impl<'a> MockUe<'a> {
 
     pub async fn handle_rrc_security_mode(&mut self) -> Result<()> {
         let message = self.du.receive_rrc_dl_dcch(&self.du_ue_context).await?;
-        let DlDcchMessageType::C1(C1_2::SecurityModeCommand(security_mode_command)) = message
+        let DlDcchMessageType::C1(C1_2::SecurityModeCommand(security_mode_command)) = *message
         else {
             bail!("Expected security mode command - got {:?}", message)
         };
         info!(&self.logger, "Rrc SecurityModeCommand <<");
-        let security_mode_complete =
-            build_rrc::security_mode_complete(security_mode_command.rrc_transaction_identifier);
+        let security_mode_complete = Box::new(build_rrc::security_mode_complete(
+            security_mode_command.rrc_transaction_identifier,
+        ));
         info!(&self.logger, "Rrc SecurityModeComplete >>");
         self.du
-            .send_ul_rrc(&mut self.du_ue_context, security_mode_complete)
+            .send_ul_rrc(&mut self.du_ue_context, &security_mode_complete)
             .await
     }
 
     pub async fn handle_nas_registration_accept(&mut self) -> Result<()> {
-        let _nas_registration_accept = self.receive_nas().await?;
+        let nas_registration_accept = self.receive_nas().await?;
         info!(&self.logger, "NAS Registration Accept <<");
+        let nas = decode_nas_5gs_message(&nas_registration_accept)?;
+        let Nas5gsMessage::SecurityProtected(_header, message) = nas else {
+            bail!("Expected security protected message, got {nas:?}")
+        };
+        let Nas5gsMessage::Gmm(_, Nas5gmmMessage::RegistrationAccept(message)) = *message else {
+            bail!("Expected security protected registration accept")
+        };
+        let Some(guti_ie) = message.fg_guti else {
+            bail!("Expected GUTI in registration accept")
+        };
+        let guti = &guti_ie.value[1..11];
+        info!(&self.logger, "UE was assigned GUTI {:02x?}", guti);
+        self.use_guti(guti.try_into().unwrap());
+
         let nas_registration_complete = build_nas::registration_complete()?;
         info!(&self.logger, "NAS Registration Complete >>");
         self.send_nas(nas_registration_complete).await
     }
 
     pub async fn send_nas_pdu_session_establishment_request(&mut self) -> Result<()> {
-        let nas_session_establishment_request = build_nas::pdu_session_establishment_request()?;
+        let nas_session_establishment_request =
+            build_nas::pdu_session_establishment_request(self.dnn)?;
         info!(&self.logger, "NAS PDU session establishment request >>");
         self.send_nas(nas_session_establishment_request).await
     }
@@ -147,7 +190,7 @@ impl<'a> MockUe<'a> {
 
     async fn handle_rrc_reconfiguration(&mut self) -> Result<Vec<u8>> {
         let rrc = self.du.receive_rrc_dl_dcch(&self.du_ue_context).await?;
-        let nas_messages = match rrc {
+        let nas_messages = match *rrc {
             DlDcchMessageType::C1(C1_2::RrcReconfiguration(RrcReconfiguration {
                 critical_extensions:
                     CriticalExtensions15::RrcReconfiguration(RrcReconfigurationIEs {
@@ -172,11 +215,12 @@ impl<'a> MockUe<'a> {
         }?;
         let nas = nas_messages.head.0;
 
-        let rrc_reconfiguration_complete =
-            build_rrc::reconfiguration_complete(RrcTransactionIdentifier(0));
+        let rrc_reconfiguration_complete = Box::new(build_rrc::reconfiguration_complete(
+            RrcTransactionIdentifier(0),
+        ));
         info!(&self.logger, "Rrc ReconfigurationComplete >>");
         self.du
-            .send_ul_rrc(&mut self.du_ue_context, rrc_reconfiguration_complete)
+            .send_ul_rrc(&mut self.du_ue_context, &rrc_reconfiguration_complete)
             .await?;
 
         Ok(nas)
@@ -185,11 +229,11 @@ impl<'a> MockUe<'a> {
     async fn send_nas(&mut self, nas_bytes: Vec<u8>) -> Result<()> {
         let rrc = build_rrc::ul_information_transfer(nas_bytes);
         info!(&self.logger, "UlInformationTransfer(Nas) >>");
-        self.du.send_ul_rrc(&mut self.du_ue_context, rrc).await
+        self.du.send_ul_rrc(&mut self.du_ue_context, &rrc).await
     }
 
     pub async fn receive_nas(&self) -> Result<Vec<u8>> {
-        match self.du.receive_rrc_dl_dcch(&self.du_ue_context).await? {
+        match *self.du.receive_rrc_dl_dcch(&self.du_ue_context).await? {
             DlDcchMessageType::C1(C1_2::DlInformationTransfer(DlInformationTransfer {
                 critical_extensions:
                     CriticalExtensions4::DlInformationTransfer(DlInformationTransferIEs {
@@ -210,6 +254,7 @@ impl<'a> MockUe<'a> {
 
     pub async fn send_nas_deregistration_request(&mut self) -> Result<()> {
         let nas_deregistration_request = build_nas::deregistration_request()?;
+        self.guti = None;
         info!(&self.logger, "NAS deregistration request >>");
         self.send_nas(nas_deregistration_request).await
     }
@@ -244,5 +289,30 @@ impl<'a> MockUe<'a> {
             "NAS Authentication failure (synch failure) >>"
         );
         self.send_nas(nas_authentication_failure).await
+    }
+
+    pub async fn receive_nas_registration_reject(&self) -> Result<()> {
+        match decode_nas_5gs_message(&self.receive_nas().await?)? {
+            Nas5gsMessage::Gmm(_, Nas5gmmMessage::RegistrationReject(_)) => Ok(()),
+            m => bail!("Expected reject, got {:?}", m),
+        }
+    }
+
+    async fn receive_security_protected_nas(&self) -> Result<Nas5gmmMessage> {
+        let nas = decode_nas_5gs_message(&self.receive_nas().await?)?;
+        let Nas5gsMessage::SecurityProtected(_, message) = nas else {
+            bail!("Expected security protected message, got bytes: {:?}", nas);
+        };
+        match *message {
+            Nas5gsMessage::Gmm(_, nas_gmm) => Ok(nas_gmm),
+            _ => bail!("Expected 5GMM message, got GSM message"),
+        }
+    }
+
+    pub async fn receive_nas_5gmm_status(&self) -> Result<()> {
+        match self.receive_security_protected_nas().await? {
+            Nas5gmmMessage::FGmmStatus(_) => Ok(()),
+            m => bail!("Expected 5GMM status, got {:?}", m),
+        }
     }
 }

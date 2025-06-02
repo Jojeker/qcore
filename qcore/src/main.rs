@@ -1,13 +1,11 @@
 //! main - starts a single-instance combined CU-CP and CU-UP
 
 #![allow(unused_parens)]
-use anyhow::anyhow;
-use anyhow::{Result, ensure};
+use anyhow::{Result, anyhow, ensure};
 use async_std::channel::Sender;
 use async_std::prelude::*;
 use clap::Parser;
-use local_ip_address;
-use qcore::{Config, QCore, SubscriberDb};
+use qcore::{AmfIds, Config, PlmnIdentity, QCore, SubscriberDb};
 use signal_hook::consts::signal::*;
 use signal_hook_async_std::Signals;
 use slog::{Drain, Logger, o};
@@ -53,6 +51,11 @@ struct Args {
     /// SIM credentials file to load.
     #[arg(long, default_value = "./sims.toml")]
     sim_cred_file: String,
+
+    /// Slice SST to support.  (SD is always set to 0.)  This is signalled as the allowed SST on NAS registration accept
+    /// and Nssai on PDU session establishment accept.
+    #[arg(long, default_value_t = 1)]
+    sst: u8,
 }
 
 #[async_std::main]
@@ -64,19 +67,18 @@ async fn main() -> Result<()> {
     let (plmn, serving_network_name) = convert_mcc_mnc(&args.mcc, &args.mnc).unwrap();
     check_ue_subnet(&args.ue_subnet)?;
     check_local_ip(&args.local_ip)?;
-    slog::info!(&logger, "Serving network name {}", serving_network_name);
 
     let sub_db = SubscriberDb::new_from_sim_file(&args.sim_cred_file, &logger)?;
 
     let _qc = QCore::start(
         Config {
             ip_addr: args.local_ip,
-            plmn,
-            amf_ids: [0x01, 0x00, 0x80],
+            plmn: PlmnIdentity(plmn),
+            amf_ids: AmfIds([0x01, 0x00, 0x80]),
             name: Some("QCore".to_string()),
             serving_network_name,
             skip_ue_authentication_check: false,
-            sst: 1,
+            sst: args.sst,
             f1u_interface_name: args.f1u_interface_name,
             n6_interface_name: args.n6_interface_name,
             tun_interface_name: args.tun_interface_name,

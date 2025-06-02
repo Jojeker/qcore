@@ -113,7 +113,7 @@ impl PacketProcessor {
 
         // Generate a UE IP.  We currently hardcode assumptions of 1 PDU session
         // per UE, and max 254 UEs.
-        let mut ue_addr_octets = self.ue_subnet.octets().clone();
+        let mut ue_addr_octets = self.ue_subnet.octets();
         ue_addr_octets[3] = idx;
         let ue_ipv4_addr = Ipv4Addr::from(ue_addr_octets);
 
@@ -127,6 +127,7 @@ impl PacketProcessor {
             uplink_gtp_teid: GtpTeid(teid),
             ue_ip_addr: IpAddr::V4(ue_ipv4_addr),
             qfi: 0,
+            five_qi: 82,
         })
     }
 

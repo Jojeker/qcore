@@ -14,7 +14,7 @@ pub fn f1_setup_response(
     gnb_cu_name: Option<String>,
 ) -> Result<F1SetupResponse> {
     // Ask for all served cells to be activated.
-    let sib2 = build_sib2().into_bytes()?;
+    let sib2 = build_sib2().as_bytes()?;
     let cells_to_be_activated_list = r.gnb_du_served_cells_list.map(|cells| {
         CellsToBeActivatedList(
             cells
@@ -33,7 +33,8 @@ pub fn f1_setup_response(
         transport_layer_address_info: None,
         ul_bh_non_up_traffic_mapping: None,
         bap_address: None,
-        extended_gnb_du_name: None,
+        extended_gnb_cu_name: None,
+        ncgi_to_be_updated_list: None,
     })
 }
 
@@ -48,6 +49,7 @@ pub fn gnb_du_configuration_update_acknowledge(
         transport_layer_address_info: None,
         ul_bh_non_up_traffic_mapping: None,
         bap_address: None,
+        cells_for_son_list: None,
     }
 }
 
@@ -56,8 +58,8 @@ pub fn dl_rrc_message_transfer(
     gnb_du_ue_f1ap_id: GnbDuUeF1apId,
     rrc_container: RrcContainer,
     srb_id: SrbId,
-) -> DlRrcMessageTransfer {
-    DlRrcMessageTransfer {
+) -> Box<DlRrcMessageTransfer> {
+    Box::new(DlRrcMessageTransfer {
         gnb_cu_ue_f1ap_id: GnbCuUeF1apId(ue_id),
         gnb_du_ue_f1ap_id,
         old_gnb_du_ue_f1ap_id: None,
@@ -71,7 +73,8 @@ pub fn dl_rrc_message_transfer(
         plmn_assistance_info_for_net_shar: None,
         new_gnb_cu_ue_f1ap_id: None,
         additional_rrm_priority_index: None,
-    }
+        srb_mapping_info: None,
+    })
 }
 
 fn build_sib2() -> rrc::Sib2 {
@@ -132,6 +135,8 @@ fn served_cell_to_activated(
         extended_available_plmn_list: None,
         iab_info_iab_donor_cu: None,
         available_snpn_id_list: None,
+        mbs_broadcast_neighbour_cell_list: None,
+        ss_bs_within_the_cell_tobe_activated_list: None,
     }
 }
 
@@ -140,13 +145,14 @@ pub fn drb_to_be_setup_item(
     gtp_tunnel: GtpTunnel,
     pdu_session_id: u8,
     qfi: u8,
+    five_qi: u8,
 ) -> DrbsToBeSetupItem {
     DrbsToBeSetupItem {
         drb_id: DrbId(1),
         qos_information: QosInformation::DrbInformation(DrbInformation {
             drb_qos: QosFlowLevelQosParameters {
                 qos_characteristics: QosCharacteristics::NonDynamic5qi(NonDynamic5qiDescriptor {
-                    five_qi: 82,
+                    five_qi,
                     qos_priority_level: None,
                     averaging_window: None,
                     max_data_burst_volume: None,
@@ -163,6 +169,8 @@ pub fn drb_to_be_setup_item(
                 pdu_session_id: Some(PduSessionId(pdu_session_id)),
                 ulpdu_session_aggregate_maximum_bit_rate: None,
                 qos_monitoring_request: None,
+                pdcp_terminating_node_dl_tnl_addr_info: None,
+                pdu_set_qos_parameters: None,
             },
             snssai: snssai.into(),
             notification_control: None,
@@ -171,7 +179,7 @@ pub fn drb_to_be_setup_item(
                 qos_flow_level_qos_parameters: QosFlowLevelQosParameters {
                     qos_characteristics: QosCharacteristics::NonDynamic5qi(
                         NonDynamic5qiDescriptor {
-                            five_qi: 82,
+                            five_qi,
                             qos_priority_level: None,
                             averaging_window: None,
                             max_data_burst_volume: None,
@@ -189,15 +197,20 @@ pub fn drb_to_be_setup_item(
                     pdu_session_id: None,
                     ulpdu_session_aggregate_maximum_bit_rate: None,
                     qos_monitoring_request: None,
+                    pdcp_terminating_node_dl_tnl_addr_info: None,
+                    pdu_set_qos_parameters: None
                 },
                 qos_flow_mapping_indication: None,
                 tsc_traffic_characteristics: None,
             }]),
+            ecn_markingor_congestion_information_reporting_request: None,
+            p_sib_ased_s_du_discard_ul: None,
         }),
         ul_up_tnl_information_to_be_setup_list: UlUpTnlInformationToBeSetupList(nonempty![
             UlUpTnlInformationToBeSetupItem {
                 ul_up_tnl_information: UpTransportLayerInformation::GtpTunnel(gtp_tunnel),
                 bh_info: None,
+                drb_mapping_info: None
             },
         ]),
         rlc_mode: RlcMode::RlcUmBidirectional,
@@ -209,6 +222,7 @@ pub fn drb_to_be_setup_item(
         ulpdcpsn_length: Some(PdcpsnLength::TwelveBits),
         additional_pdcp_duplication_tnl_list: None,
         rlc_duplication_information: None,
+        sdtrlc_bearer_configuration: None,
     }
 }
 
@@ -225,7 +239,7 @@ pub fn ue_context_setup_request(
     ue: &UeContext,
     transport_layer_address: TransportLayerAddress,
     session: &PduSession,
-) -> Result<UeContextSetupRequest> {
+) -> Result<Box<UeContextSetupRequest>> {
     // TODO: avoid hardcoding
     let gnb_du_ue_ambr_ul = Some(BitRate(1_000_000));
 
@@ -236,10 +250,11 @@ pub fn ue_context_setup_request(
             gtp_teid: session.userplane_info.uplink_gtp_teid.clone()
         },
         session.id,
-        session.userplane_info.qfi
+        session.userplane_info.qfi,
+        session.userplane_info.five_qi
     )]));
 
-    Ok(UeContextSetupRequest {
+    Ok(Box::new(UeContextSetupRequest {
         gnb_cu_ue_f1ap_id: GnbCuUeF1apId(ue.key),
         gnb_du_ue_f1ap_id: Some(ue.gnb_du_ue_f1ap_id),
         sp_cell_id: ue.nr_cgi.clone(),
@@ -255,6 +270,18 @@ pub fn ue_context_setup_request(
             ue_assistance_information: None,
             cg_config: None,
             ue_assistance_information_eutra: None,
+            location_measurement_information: None,
+            musim_gap_config: None,
+            sdt_mac_phy_cg_config: None,
+            mbs_interest_indication: None,
+            need_for_gaps_info_nr: None,
+            need_for_gap_ncsg_info_nr: None,
+            need_for_gap_ncsg_info_eutra: None,
+            config_restrict_info_daps: None,
+            preconfigured_measurement_gap_request: None,
+            need_for_interruption_info_nr: None,
+            musim_capability_restriction_indication: None,
+            musim_candidate_band_list: None,
         },
         candidate_sp_cell_list: None,
         drx_cycle: None,
@@ -266,6 +293,8 @@ pub fn ue_context_setup_request(
             srb_id: SrbId(2),
             duplication_indication: None,
             additional_duplication_indication: None,
+            sdtrlc_bearer_configuration: None,
+            srb_mapping_info: None
         }])),
         drbs_to_be_setup_list,
         inactivity_monitoring_request: None,
@@ -293,11 +322,38 @@ pub fn ue_context_setup_request(
         management_based_mdt_plmn_list: None,
         serving_nid: None,
         f1c_transfer_path: None,
-    })
+        f1c_transfer_path_nr_dc: None,
+        mdt_polluted_measurement_indicator: None,
+        scg_activation_request: None,
+        cg_sdt_session_info_old: None,
+        five_g_pro_se_authorized: None,
+        five_g_pro_se_ue_pc5_aggregate_maximum_bitrate: None,
+        five_g_pro_se_pc5_link_ambr: None,
+        uu_rlc_channel_to_be_setup_list: None,
+        pc5rlc_channel_to_be_setup_list: None,
+        path_switch_configuration: None,
+        gnb_du_ue_slice_maximum_bit_rate_list: None,
+        multicast_mbs_session_setup_list: None,
+        ue_multicast_mr_bs_to_be_setup_list: None,
+        serving_cell_mo_list: None,
+        network_controlled_repeater_authorized: None,
+        sdt_volume_threshold: None,
+        ltm_information_setup: None,
+        ltm_configuration_id_mapping_list: None,
+        early_sync_information_request: None,
+        path_addition_information: None,
+        nr_a2x_services_authorized: None,
+        ltea2x_services_authorized: None,
+        nr_ue_sidelink_aggregate_maximum_bitrate_for_a2x: None,
+        lte_ue_sidelink_aggregate_maximum_bitrate_for_a2x: None,
+        dllbt_failure_information_request: None,
+        sl_positioning_ranging_service_info: None,
+        non_integer_drx_cycle: None,
+    }))
 }
 
-pub fn ue_context_release_command(ue: &UeContext, cause: Cause) -> UeContextReleaseCommand {
-    UeContextReleaseCommand {
+pub fn ue_context_release_command(ue: &UeContext, cause: Cause) -> Box<UeContextReleaseCommand> {
+    Box::new(UeContextReleaseCommand {
         gnb_cu_ue_f1ap_id: GnbCuUeF1apId(ue.key),
         gnb_du_ue_f1ap_id: ue.gnb_du_ue_f1ap_id,
         cause,
@@ -307,5 +363,9 @@ pub fn ue_context_release_command(ue: &UeContext, cause: Cause) -> UeContextRele
         execute_duplication: None,
         rrc_delivery_status_request: None,
         target_cells_to_cancel: None,
-    }
+        pos_context_rev_indication: None,
+        cg_sdt_kept_indicator: None,
+        ltm_cells_to_be_released_list: None,
+        dllbt_failure_information_request: None,
+    })
 }

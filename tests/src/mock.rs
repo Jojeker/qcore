@@ -28,7 +28,7 @@ pub enum MockEvent<P: Pdu> {
 }
 
 pub struct ReceivedPdu<P: Pdu> {
-    pub pdu: P,
+    pub pdu: Box<P>,
     pub assoc_id: u32,
 }
 
@@ -53,10 +53,9 @@ impl<P: Pdu> Mock<P> {
     pub async fn new(logger: Logger) -> Self {
         let (sender, receiver) = async_channel::unbounded();
         //let receiver = DebugReceiver(receiver, logger.clone());
-        let transport = SctpTransportProvider::new();
 
         Mock {
-            transport,
+            transport: SctpTransportProvider::new(),
             receiver,
             logger,
             handler: Handler(sender),
@@ -121,8 +120,8 @@ impl<P: Pdu> Mock<P> {
         }
     }
 
-    pub async fn send<T: SerDes>(&self, pdu: T, assoc_id: Option<u32>) {
-        let message = pdu.into_bytes().unwrap();
+    pub async fn send<T: SerDes>(&self, pdu: &T, assoc_id: Option<u32>) {
+        let message = pdu.as_bytes().unwrap();
         self.transport
             .send_message(message, assoc_id, &self.logger)
             .await
@@ -130,7 +129,7 @@ impl<P: Pdu> Mock<P> {
     }
 
     /// Receive a Pdu, with a 0.5s timeout.
-    pub async fn receive_pdu(&self) -> Result<P> {
+    pub async fn receive_pdu(&self) -> Result<Box<P>> {
         self.receive_pdu_with_assoc_id().await.map(|r| r.pdu)
     }
 
@@ -170,7 +169,7 @@ impl<P: Pdu> TnlaEventHandler for Handler<P> {
     async fn handle_message(&self, message: Vec<u8>, tnla_id: u32, _logger: &Logger) {
         self.0
             .send(MockEvent::Pdu(ReceivedPdu {
-                pdu: P::from_bytes(&message).unwrap(),
+                pdu: Box::new(P::from_bytes(&message).unwrap()),
                 assoc_id: tnla_id,
             }))
             .await

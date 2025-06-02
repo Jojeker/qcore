@@ -16,7 +16,7 @@ pub async fn dump_stats(
     const WEIGHT: f64 =
         2.0 / ((RATE_APPROX_WINDOW_SECS as f64 / SAMPLE_INTERVAL_SECS as f64) + 1.0);
 
-    let mut rate = [0f64; FIRST_NON_RATE as usize];
+    let mut rate = [0f64; FIRST_NON_RATE];
 
     // TODO: to cope with wrapping, we need to store a 'last' value
     // per cpu.  u64 will not wrap for many lifetimes, but if these
@@ -45,7 +45,7 @@ pub async fn dump_stats(
         let mut warn_needed = false;
         let mut sum = [0u64; NumCounters as usize];
 
-        for stat in 0..FIRST_NON_RATE as usize {
+        for (stat, rate) in rate.iter_mut().enumerate().take(FIRST_NON_RATE) {
             // Take the delta of the counter and divide by the sample duration to get
             // a change per second.
             // e.g. if 5 packets arrived, that is 1pps.
@@ -54,16 +54,16 @@ pub async fn dump_stats(
 
             // Fold into the moving average to get an approximate rate over a time
             // window. e.g. "average packets per second over the last 30 seconds".
-            rate[stat] = (WEIGHT * delta_per_second as f64 + (1.0 - WEIGHT) * rate[stat]).floor();
+            *rate = (WEIGHT * delta_per_second as f64 + (1.0 - WEIGHT) * *rate).floor();
 
             // If no data is flowing, the rate will decay to 0.
             // We keep issuing info logs tracing this until it gets below 10 per second.
-            if rate[stat] >= 10.0 || delta != 0 {
+            if *rate >= 10.0 || delta != 0 {
                 info_needed = true;
             }
         }
 
-        for stat in FIRST_NON_RATE..FIRST_WARN_IDX as usize {
+        for stat in FIRST_NON_RATE..FIRST_WARN_IDX {
             info_needed |=
                 update_sum(stat, &mut sum, &mut last, &per_cpu_ebpf_counters, num_cpus)? != 0;
         }
@@ -75,57 +75,64 @@ pub async fn dump_stats(
 
         if info_needed {
             let mut s = String::new();
-            for i in 0 as usize..FIRST_NON_RATE as usize {
-                write!(&mut s, " {}/s={}", CounterIndex::VARIANTS[i], rate[i])?;
+            for (i, rate) in rate.iter().enumerate().take(FIRST_NON_RATE) {
+                write!(&mut s, " {}/s={}", CounterIndex::VARIANTS[i], rate)?;
             }
-            for i in 0 as usize..FIRST_WARN_IDX as usize {
-                write!(&mut s, " {}={}", CounterIndex::VARIANTS[i], last[i])?;
+            for (i, last) in last.iter().enumerate().take(FIRST_WARN_IDX) {
+                write!(&mut s, " {}={}", CounterIndex::VARIANTS[i], last)?;
             }
             info!(&logger, "{}", s);
         }
 
         if warn_needed {
             let mut s = String::new();
-            for i in FIRST_WARN_IDX as usize..NumCounters as usize {
-                write!(&mut s, " {}={}", CounterIndex::VARIANTS[i], last[i])?;
+            for (i, last) in last
+                .iter()
+                .enumerate()
+                .take(NumCounters as usize)
+                .skip(FIRST_WARN_IDX)
+            {
+                write!(&mut s, " {}={}", CounterIndex::VARIANTS[i], last)?;
             }
             warn!(&logger, "{}", s);
         }
 
-        next_cpu_heatmap -= SAMPLE_INTERVAL_SECS as isize;
-        if next_cpu_heatmap <= 0 {
-            let Ok(per_cpu_ul) = per_cpu_ebpf_counters.get(&(UlRxPkts as u32), 0) else {
-                continue;
-            };
-            let Ok(per_cpu_dl) = per_cpu_ebpf_counters.get(&(DlRxPkts as u32), 0) else {
-                continue;
-            };
-            let mut ul_string = String::new();
-            let mut dl_string = String::new();
-            for cpu in 0..num_cpus {
-                write!(
-                    &mut ul_string,
-                    "{}|",
-                    per_cpu_ul[cpu] - ul_heatmap_last[cpu]
-                )?;
-                write!(
-                    &mut dl_string,
-                    "{}|",
-                    per_cpu_dl[cpu] - dl_heatmap_last[cpu]
-                )?;
-                ul_heatmap_last[cpu] = per_cpu_ul[cpu];
-                dl_heatmap_last[cpu] = per_cpu_dl[cpu];
-            }
-            info!(
-                &logger,
-                "UL CPU heatmap last {}s: {}", CPU_HEATMAP_INTERVAL_SEC, ul_string
-            );
-            info!(
-                &logger,
-                "DL CPU heatmap last {}s: {}", CPU_HEATMAP_INTERVAL_SEC, dl_string
-            );
+        if info_needed {
+            next_cpu_heatmap -= SAMPLE_INTERVAL_SECS as isize;
+            if next_cpu_heatmap <= 0 {
+                let Ok(per_cpu_ul) = per_cpu_ebpf_counters.get(&(UlRxPkts as u32), 0) else {
+                    continue;
+                };
+                let Ok(per_cpu_dl) = per_cpu_ebpf_counters.get(&(DlRxPkts as u32), 0) else {
+                    continue;
+                };
+                let mut ul_string = String::new();
+                let mut dl_string = String::new();
+                for cpu in 0..num_cpus {
+                    write!(
+                        &mut ul_string,
+                        "{}|",
+                        per_cpu_ul[cpu] - ul_heatmap_last[cpu]
+                    )?;
+                    write!(
+                        &mut dl_string,
+                        "{}|",
+                        per_cpu_dl[cpu] - dl_heatmap_last[cpu]
+                    )?;
+                    ul_heatmap_last[cpu] = per_cpu_ul[cpu];
+                    dl_heatmap_last[cpu] = per_cpu_dl[cpu];
+                }
+                info!(
+                    &logger,
+                    "UL CPU heatmap last {}s: {}", CPU_HEATMAP_INTERVAL_SEC, ul_string
+                );
+                info!(
+                    &logger,
+                    "DL CPU heatmap last {}s: {}", CPU_HEATMAP_INTERVAL_SEC, dl_string
+                );
 
-            next_cpu_heatmap = CPU_HEATMAP_INTERVAL_SEC as isize;
+                next_cpu_heatmap = CPU_HEATMAP_INTERVAL_SEC as isize;
+            }
         }
     }
 }

@@ -22,7 +22,7 @@ impl<'a, A: HandlerApi> SessionEstablishmentProcedure<'a, A> {
     pub async fn run(
         &mut self,
         hdr: Nas5gsmHeader,
-        _r: NasPduSessionEstablishmentRequest,
+        _r: &NasPduSessionEstablishmentRequest,
         dnn: Option<Vec<u8>>,
     ) -> Result<()> {
         self.log_message(">> NasPduSessionEstablishmentRequest");
@@ -31,8 +31,8 @@ impl<'a, A: HandlerApi> SessionEstablishmentProcedure<'a, A> {
         let session = PduSession {
             id: session_id,
             snssai: Snssai(self.config().sst, None),
-            userplane_info: self.api.reserve_userplane_session(&self.logger).await?,
-            dnn: dnn.unwrap_or_default(),
+            userplane_info: self.api.reserve_userplane_session(self.logger).await?,
+            dnn: dnn.unwrap_or(b"internet".to_vec()),
         };
 
         let (cell_group_config, remote_tunnel_info) =
@@ -41,10 +41,11 @@ impl<'a, A: HandlerApi> SessionEstablishmentProcedure<'a, A> {
         let accept = crate::nas::build::pdu_session_establishment_accept(
             &session,
             hdr.procedure_transaction_identity,
+            self.config().sst,
         )?;
         let accept = self.ue.nas.encode(accept)?;
 
-        self.commit_userplane_session(&session.userplane_info, remote_tunnel_info, &self.logger)
+        self.commit_userplane_session(&session.userplane_info, remote_tunnel_info, self.logger)
             .await?;
         self.ue.pdu_sessions.push(session);
 
@@ -83,8 +84,8 @@ impl<'a, A: HandlerApi> SessionEstablishmentProcedure<'a, A> {
             pdu_session_id,
         );
         self.log_message("<< RrcReconfiguration(Nas)");
-        let response = self.rrc_request(SrbId(1), rrc_reconfiguration).await?;
-        self.check_rrc_reconfiguration_complete(response)?;
+        let response = self.rrc_request(SrbId(1), &rrc_reconfiguration).await?;
+        self.check_rrc_reconfiguration_complete(&response)?;
         self.log_message(">> RrcReconfigurationComplete");
         Ok(())
     }
@@ -122,7 +123,7 @@ impl<'a, A: HandlerApi> SessionEstablishmentProcedure<'a, A> {
         Ok((cell_group_config, remote_tunnel_info))
     }
 
-    fn check_rrc_reconfiguration_complete(&self, message: UlDcchMessage) -> Result<()> {
+    fn check_rrc_reconfiguration_complete(&self, message: &UlDcchMessage) -> Result<()> {
         let UlDcchMessage {
             message: UlDcchMessageType::C1(C1_6::RrcReconfigurationComplete(_response)),
         } = message
