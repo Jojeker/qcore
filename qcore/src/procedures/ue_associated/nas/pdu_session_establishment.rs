@@ -1,8 +1,6 @@
-use super::UeProcedure;
-use crate::{HandlerApi, PduSession};
-use anyhow::{Result, bail};
+use super::prelude::*;
+use crate::{PduSession, procedures::ue_associated::F1apBase};
 use asn1_per::nonempty;
-use derive_deref::{Deref, DerefMut};
 use f1ap::{
     CellGroupConfig, DlUpTnlInformationToBeSetupItem, DuToCuRrcInformation, SrbId,
     UeContextSetupProcedure, UeContextSetupResponse, UpTransportLayerInformation,
@@ -11,14 +9,9 @@ use oxirush_nas::messages::{Nas5gsmHeader, NasPduSessionEstablishmentRequest};
 use rrc::{C1_6, UlDcchMessage, UlDcchMessageType};
 use xxap::{GtpTunnel, Snssai};
 
-#[derive(Deref, DerefMut)]
-pub struct SessionEstablishmentProcedure<'a, A: HandlerApi>(UeProcedure<'a, A>);
+define_ue_procedure!(SessionEstablishmentProcedure);
 
 impl<'a, A: HandlerApi> SessionEstablishmentProcedure<'a, A> {
-    pub fn new(ue_procedure: UeProcedure<'a, A>) -> Self {
-        SessionEstablishmentProcedure(ue_procedure)
-    }
-
     pub async fn run(
         &mut self,
         hdr: Nas5gsmHeader,
@@ -65,7 +58,7 @@ impl<'a, A: HandlerApi> SessionEstablishmentProcedure<'a, A> {
         )?;
         self.log_message("<< UeContextSetupRequest");
         let rsp = self
-            .f1ap_request::<UeContextSetupProcedure>(ue_context_setup_request, self.logger)
+            .xxap_request::<UeContextSetupProcedure>(ue_context_setup_request, self.logger)
             .await?;
         self.log_message(">> UeContextSetupResponse");
         self.check_ue_context_setup_response(rsp)

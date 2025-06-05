@@ -5,10 +5,10 @@ mod qcore;
 mod userplane;
 
 use data::*;
-use procedures::{HandlerApi, Procedure};
+use procedures::HandlerApi;
 use protocols::*;
 
-pub use ::f1ap::PlmnIdentity;
+pub use ::xxap::PlmnIdentity;
 pub use data::{Config, SimCreds, SubscriberDb};
 pub use nas::AmfIds;
 pub use qcore::{ProgramHandle, QCore};

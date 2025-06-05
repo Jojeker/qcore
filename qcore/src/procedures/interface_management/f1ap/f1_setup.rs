@@ -1,20 +1,10 @@
 //! f1_setup - the initial handshake that establishes an instance of the F1 reference point between GNB-CU and GNB-DU
-
-use crate::{HandlerApi, Procedure};
-use anyhow::Result;
-use derive_deref::{Deref, DerefMut};
+use super::prelude::*;
 use f1ap::{F1SetupFailure, F1SetupRequest, F1SetupResponse};
-use slog::{Logger, info};
 use xxap::{RequestError, ResponseAction};
 
-#[derive(Deref, DerefMut)]
-pub struct F1SetupProcedure<'a, A: HandlerApi>(Procedure<'a, A>);
-
+define_procedure!(F1SetupProcedure);
 impl<'a, A: HandlerApi> F1SetupProcedure<'a, A> {
-    pub fn new(api: &'a A, logger: &'a Logger) -> Self {
-        F1SetupProcedure(Procedure::new(api, logger))
-    }
-
     // F1 Setup Procedure
     // 1.    F1ap F1SetupRequest >>
     // 2.    F1ap F1SetupResponse <<

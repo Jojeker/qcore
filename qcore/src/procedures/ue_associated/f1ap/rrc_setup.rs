@@ -1,37 +1,30 @@
 //! initial_access - procedure in which UE makes first contact with the 5G core
 
-use super::registration::RegistrationProcedure;
-use super::{HandlerApi, UeProcedure};
-use crate::expect_nas;
-use anyhow::{Result, anyhow, bail};
+use super::super::RegistrationProcedure;
+use super::prelude::*;
+use crate::ensure_nas;
 use asn1_per::SerDes;
-use derive_deref::{Deref, DerefMut};
 use f1ap::{DuToCuRrcContainer, InitialUlRrcMessageTransfer, SrbId};
-use oxirush_nas::{Nas5gmmMessage, Nas5gsMessage};
 use rrc::{
     C1_4, C1_6, CriticalExtensions22, RrcSetupComplete, RrcSetupRequest, UlCcchMessage,
     UlCcchMessageType, UlDcchMessage, UlDcchMessageType,
 };
 
-#[derive(Deref, DerefMut)]
-pub struct RrcSetupProcedure<'a, A: HandlerApi>(UeProcedure<'a, A>);
+define_ue_procedure!(RrcSetupProcedure);
 
 impl<'a, A: HandlerApi> RrcSetupProcedure<'a, A> {
-    pub fn new(inner: UeProcedure<'a, A>) -> Self {
-        RrcSetupProcedure(inner)
-    }
-
     pub async fn run(mut self, r: Box<InitialUlRrcMessageTransfer>) -> Result<()> {
+        self.ue.ran_ue_id = r.gnb_du_ue_f1ap_id.0;
+        self.ue.nr_cgi = Some(r.nr_cgi.clone());
+
         let nas_bytes = self.handle_rrc_setup(r).await?;
 
-        // Follow on registration
         if let Ok((nas_message, security_header)) = self.nas_decode_with_security_header(&nas_bytes)
         {
-            if let Ok(registration_request) = expect_nas!(RegistrationRequest, nas_message) {
-                RegistrationProcedure::new(self.0)
-                    .run(Box::new(registration_request), security_header)
-                    .await?;
-            }
+            let registration_request = ensure_nas!(RegistrationRequest, nas_message);
+            RegistrationProcedure::new(self.0)
+                .run(Box::new(registration_request), security_header)
+                .await?;
         }
         Ok(())
     }

@@ -3,12 +3,14 @@ use anyhow::Result;
 use async_std::channel::Sender;
 use async_trait::async_trait;
 use f1ap::F1apPdu;
+use ngap::NgapPdu;
 use slog::Logger;
 use xxap::{GtpTunnel, Indication, Procedure, RequestError};
 
 #[derive(Debug)]
 pub enum UeMessage {
     F1ap(Box<F1apPdu>),
+    Ngap(Box<NgapPdu>),
     TakeContext(Sender<NasContext>),
 }
 
@@ -16,6 +18,7 @@ pub enum UeMessage {
 #[async_trait]
 pub trait HandlerApi: Send + Sync + Clone + 'static {
     fn config(&self) -> &Config;
+    fn ngap_mode(&self) -> bool;
 
     // Returns the K, OPC and SQN, and increments the SQN.
     // The returned SQN is the one _before_ the increment.  This means that
@@ -41,12 +44,12 @@ pub trait HandlerApi: Send + Sync + Clone + 'static {
     fn delete_ue_channel(&self, ue_id: u32);
     fn delete_ue_channels(&self);
 
-    async fn f1ap_request<P: Procedure>(
+    async fn xxap_request<P: Procedure>(
         &self,
         r: Box<P::Request>,
         logger: &Logger,
     ) -> Result<P::Success, RequestError<P::Failure>>;
-    async fn f1ap_indication<P: Indication>(&self, r: Box<P::Request>, logger: &Logger);
+    async fn xxap_indication<P: Indication>(&self, r: Box<P::Request>, logger: &Logger);
 
     async fn reserve_userplane_session(&self, logger: &Logger) -> Result<UserplaneSession>;
     async fn commit_userplane_session(

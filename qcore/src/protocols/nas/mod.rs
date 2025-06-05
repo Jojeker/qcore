@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use derive_deref::Deref;
-use f1ap::PlmnIdentity;
+use xxap::PlmnIdentity;
 
 pub mod build;
 pub mod parse;
@@ -47,11 +47,26 @@ pub enum MobileIdentity {
 }
 
 #[macro_export]
-macro_rules! expect_nas {
+macro_rules! ensure_nas {
     ($t:ident, $boxed_nas:expr) => {
         match *$boxed_nas {
-            Nas5gsMessage::Gmm(_header, Nas5gmmMessage::$t(message)) => Ok(message),
-            m => Err(anyhow!("Expected Nas {} but got {:?}", stringify!($t), m)),
+            oxirush_nas::Nas5gsMessage::Gmm(_header, oxirush_nas::Nas5gmmMessage::$t(message)) => {
+                message
+            }
+            m => bail!("Expected Nas {} but got {:?}", stringify!($t), m),
         }
     };
+}
+
+#[macro_export]
+macro_rules! expect_nas {
+    ($t:ident, $boxed_nas:expr) => {{
+        let b = $boxed_nas;
+        match *b {
+            oxirush_nas::Nas5gsMessage::Gmm(_header, oxirush_nas::Nas5gmmMessage::$t(message)) => {
+                Ok(message)
+            }
+            _ => Err(b),
+        }
+    }};
 }

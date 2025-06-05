@@ -1,8 +1,7 @@
-use super::{RrcSetupProcedure, UeProcedure};
-use crate::{HandlerApi, UeContext, data::NasContext, procedures::UeMessage};
-use anyhow::{Result, bail};
+use super::UeProcedure;
+use crate::{HandlerApi, NasContext, UeContext, procedures::UeMessage};
+use anyhow::Result;
 use async_std::channel::{self, Receiver, Sender};
-use f1ap::{F1apPdu, InitialUlRrcMessageTransfer, InitiatingMessage};
 use slog::{Logger, debug, warn};
 
 pub struct UeMessageHandler<A: HandlerApi> {
@@ -28,47 +27,18 @@ impl<A: HandlerApi> UeMessageHandler<A> {
     }
 
     async fn run(&self, ue_id: u32) -> Result<()> {
-        let (mut ue_context, r) = self.init(ue_id).await?;
         let mut give_context = None;
-        let result = self.run_inner(&mut ue_context, r, &mut give_context).await;
-        self.cleanup(&give_context, ue_context).await;
+        let mut ue = Box::new(UeContext::new(ue_id));
+        let result = self.dispatch_all(&mut ue, &mut give_context).await;
+        self.cleanup(&give_context, ue).await;
         result
     }
 
-    async fn init(&self, ue_id: u32) -> Result<(Box<UeContext>, Box<InitialUlRrcMessageTransfer>)> {
-        let UeMessage::F1ap(message) = self.receiver.recv().await? else {
-            bail!("Expected InitialUlRrcMessageTransfer, got TakeContext");
-        };
-        let r = match *message {
-            F1apPdu::InitiatingMessage(InitiatingMessage::InitialUlRrcMessageTransfer(r)) => {
-                Box::new(r)
-            }
-            _ => bail!("Expected InitialUlRrcMessageTransfer, got {message:?}"),
-        };
-        Ok((
-            Box::new(UeContext::new(ue_id, r.gnb_du_ue_f1ap_id, r.nr_cgi.clone())),
-            r,
-        ))
-    }
-
-    async fn run_inner(
+    async fn dispatch_all(
         &self,
         ue_context: &mut UeContext,
-        r: Box<InitialUlRrcMessageTransfer>,
         give_context: &mut Option<Sender<NasContext>>,
     ) -> Result<()> {
-        // Run the initial access procedure.
-        RrcSetupProcedure::new(UeProcedure::new(
-            &self.api,
-            ue_context,
-            &self.logger,
-            &self.receiver,
-            give_context,
-        ))
-        .run(r)
-        .await?;
-
-        // Run subsequent procedures.
         loop {
             UeProcedure::new(
                 &self.api,

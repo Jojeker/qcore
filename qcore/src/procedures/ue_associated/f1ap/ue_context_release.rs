@@ -1,19 +1,8 @@
-use anyhow::Result;
-use derive_deref::{Deref, DerefMut};
+use super::prelude::*;
 use f1ap::{Cause, UeContextReleaseComplete, UeContextReleaseRequest};
-use slog::info;
 
-use crate::HandlerApi;
-
-use super::UeProcedure;
-
-#[derive(Deref, DerefMut)]
-pub struct UeContextReleaseProcedure<'a, A: HandlerApi>(UeProcedure<'a, A>);
-
+define_ue_procedure!(UeContextReleaseProcedure);
 impl<'a, A: HandlerApi> UeContextReleaseProcedure<'a, A> {
-    pub fn new(ue_procedure: UeProcedure<'a, A>) -> Self {
-        UeContextReleaseProcedure(ue_procedure)
-    }
     pub async fn cu_initiated(&mut self, cause: Cause) -> Result<()> {
         self.perform_f1_ue_context_release(cause).await
     }
@@ -34,7 +23,7 @@ impl<'a, A: HandlerApi> UeContextReleaseProcedure<'a, A> {
             crate::f1ap::build::ue_context_release_command(self.ue, cause);
         self.log_message("<< UeContextReleaseCommand");
         let rsp = self
-            .f1ap_request::<f1ap::UeContextReleaseProcedure>(
+            .xxap_request::<f1ap::UeContextReleaseProcedure>(
                 ue_context_release_command,
                 self.logger,
             )
