@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow, ensure};
 use async_std::channel::Sender;
 use async_std::prelude::*;
 use clap::Parser;
-use qcore::{AmfIds, Config, PlmnIdentity, QCore, SubscriberDb};
+use qcore::{AmfIds, Config, PdcpSequenceNumberLength, PlmnIdentity, QCore, SubscriberDb};
 use signal_hook::consts::signal::*;
 use signal_hook_async_std::Signals;
 use slog::{Drain, Logger, o};
@@ -56,6 +56,14 @@ struct Args {
     /// and Nssai on PDU session establishment accept.
     #[arg(long, default_value_t = 1)]
     sst: u8,
+
+    /// 5QI value to use.
+    #[arg(long, default_value_t = 1)]
+    five_qi: u8,
+
+    /// PDCP sequence number length: 18-bit (false) or 12-bit (true).
+    #[arg(long, default_value_t = false)]
+    pdcp_12bit_sn: bool,
 }
 
 #[async_std::main]
@@ -83,6 +91,12 @@ async fn main() -> Result<()> {
             n6_interface_name: args.n6_interface_name,
             tun_interface_name: args.tun_interface_name,
             ue_subnet: args.ue_subnet,
+            pdcp_sn_length: if args.pdcp_12bit_sn {
+                PdcpSequenceNumberLength::TwelveBits
+            } else {
+                PdcpSequenceNumberLength::EighteenBits
+            },
+            five_qi: args.five_qi,
         },
         logger,
         sub_db,

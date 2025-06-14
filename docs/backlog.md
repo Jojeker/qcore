@@ -34,7 +34,7 @@ Function gaps
 - PDCP Rx reordering
 - Obey DL DATA DELIVERY STATUS backpressure (desired buffer size)
 - PDCP retransmission for RLC Am
-- Time out during procedures
+- Time out during procedures - e.g. Authentication procedure uses T3560
 - UE AMBR
 - Transport key for SIM creds
 - SUCI
@@ -49,6 +49,10 @@ Function gaps
 - >1 PDU session per UE
 - >1 DU
 
+Error handling
+- Session setup with existing PDU session ID should not leave up old session.  This was seen with OnePlus phone which repeated 
+  its session setup request (with no intervening delete) after not liking the response.
+
 Tidying + refactoring
 - avoid having to expect() on UeContext fields
 - message logs in both test framework and QCORE debug should use consistent F1 / RRC / NAS prefix
@@ -57,6 +61,7 @@ Tidying + refactoring
 
 Regression tests
 - should check there are no further messages when a mock is dropped
+- userplane testing of 18 bit PDCP sequence number
 - using real AUTS calculation (to catch SQN handling changes).
 - downlink packet checking of fields e.g. GTP payload length
 - dl delivery status packet with / without payload

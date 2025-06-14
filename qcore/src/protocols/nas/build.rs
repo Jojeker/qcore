@@ -7,9 +7,9 @@ use oxirush_nas::{
     NasAuthenticationParameterRand, NasDnn, NasExtendedProtocolConfigurationOptions, NasFGmmCause,
     NasFGsIdentityType, NasFGsMobileIdentity, NasFGsNetworkFeatureSupport,
     NasFGsRegistrationResult, NasKeySetIdentifier, NasNssai, NasPayloadContainer,
-    NasPayloadContainerType, NasPduAddress, NasPduSessionType, NasQosFlowDescriptions, NasQosRules,
-    NasSNssai, NasSecurityAlgorithms, NasSessionAmbr, NasUeSecurityCapability,
-    encode_nas_5gs_message,
+    NasPayloadContainerType, NasPduAddress, NasPduSessionIdentity2, NasPduSessionType,
+    NasQosFlowDescriptions, NasQosRules, NasSNssai, NasSecurityAlgorithms, NasSessionAmbr,
+    NasUeSecurityCapability, encode_nas_5gs_message,
     messages::{
         NasAuthenticationRequest, NasDlNasTransport, NasFGmmStatus, NasIdentityRequest,
         NasPduSessionEstablishmentAccept, NasRegistrationAccept, NasRegistrationReject,
@@ -22,12 +22,12 @@ use xxap::PlmnIdentity;
 
 use super::AmfIds;
 
-pub fn authentication_request(rand: &[u8; 16], autn: &[u8; 16]) -> Box<Nas5gsMessage> {
+pub fn authentication_request(rand: &[u8; 16], autn: &[u8; 16], ksi: u8) -> Box<Nas5gsMessage> {
     // "The SEAF shall set the ABBA parameter as defined in Annex A.7.1."
     Box::new(Nas5gsMessage::new_5gmm(
         Nas5gmmMessageType::AuthenticationRequest,
         Nas5gmmMessage::AuthenticationRequest(NasAuthenticationRequest {
-            ngksi: NasKeySetIdentifier::new(0),
+            ngksi: NasKeySetIdentifier::new(ksi),
             abba: NasAbba::new(NAS_ABBA.to_vec()),
             authentication_parameter_rand: Some(NasAuthenticationParameterRand::new(rand.to_vec())),
             authentication_parameter_autn: Some(NasAuthenticationParameterAutn::new(autn.to_vec())),
@@ -45,6 +45,7 @@ pub fn identity_request() -> Box<Nas5gsMessage> {
 
 pub fn security_mode_command(
     replayed_ue_security_capabilities: NasUeSecurityCapability,
+    ksi: u8,
 ) -> Box<Nas5gsMessage> {
     // Request retransmission of initial NAS message.
     let additional_fg_security_information =
@@ -53,7 +54,7 @@ pub fn security_mode_command(
         Nas5gmmMessageType::SecurityModeCommand,
         Nas5gmmMessage::SecurityModeCommand(NasSecurityModeCommand {
             selected_nas_security_algorithms: NasSecurityAlgorithms::new(2), // AES integrity and NULL encryption,
-            ngksi: NasKeySetIdentifier { value: 0 },
+            ngksi: NasKeySetIdentifier::new(ksi),
             replayed_ue_security_capabilities,
             imeisv_request: None,
             selected_eps_nas_security_algorithms: None,
@@ -141,16 +142,15 @@ fn session_ambr() -> NasSessionAmbr {
     // TODO - make configurable
     NasSessionAmbr::new(vec![
         // TS24.501, 9.11.4.14
-        0b00000110, // Unit for downlink = Mbps
-        0x00, 0x01,       // Downlink session AMBR = 1 Mbps
-        0b00000110, // Unit for uplink = Mbps
-        0x00, 0x01, // Uplink session AMBR = 1 Mbps
+        0x0a, // Unit for downlink = 256Mbps
+        0x00, 0x03, // Downlink session AMBR = 768Mbps
+        0x0a, // Unit for uplink = 256Mbps
+        0x00, 0x03, // Uplink session AMBR = 768Mbps
     ])
 }
 
-const QFI_1: u8 = 0b00_000001;
-
-fn authorized_qos_rules() -> NasQosRules {
+fn authorized_qos_rules(qfi: u8) -> NasQosRules {
+    let packet_filter_identifier = 0b0001 as u8;
     NasQosRules::new(vec![
         // TS24.501, 9.11.4.13
         0x01, // Qos Rule Identifier = 1
@@ -158,23 +158,23 @@ fn authorized_qos_rules() -> NasQosRules {
         0x06,         // Length of QoS rule
         0b001_1_0001, // Rule operation code 001 (create new); default Qos Rule 1; number of packet filters = 1,
         // Packet filter 1
-        0b00_11_1111, // Packet filter direction = 11 (bidirectional); packet filter identifier = 1111
-        0x01,         // Length of packet filter contents
+        0b00_11_0000 | packet_filter_identifier, // Packet filter direction = 11 (bidirectional); packet filter identifier = 0001
+        0x01,                                    // Length of packet filter contents
         // Packet filter 1 contents
         0b00000001, // Packet filter type = match all
         0xff,       // QoS rule precedence,
-        QFI_1,      // spare; QFI 1
+        qfi,        // spare; QFI 1
     ])
 }
 
-fn authorized_qos_flow_descriptions(five_qi: u8) -> NasQosFlowDescriptions {
+fn authorized_qos_flow_descriptions(qfi: u8, five_qi: u8) -> NasQosFlowDescriptions {
     NasQosFlowDescriptions::new(vec![
         // TS24.501, 9.11.4.12
-        QFI_1, // QFI 1
-        0x20,  // Create new
-        0x41,  // 1 parameter supplied
-        0x01,  // Param type = 5QI
-        0x01,  // Length 1
+        qfi,  // QFI 1
+        0x20, // Create new
+        0x41, // 1 parameter supplied
+        0x01, // Param type = 5QI
+        0x01, // Length 1
         five_qi,
     ])
 }
@@ -207,47 +207,58 @@ pub fn pdu_session_establishment_accept(
     };
 
     let five_qi = pdu_session.userplane_info.five_qi;
+    let qfi = pdu_session.userplane_info.qfi;
     let dns_primary = &[0x08, 0x08, 0x08, 0x08];
     let dns_secondary = &[0x08, 0x08, 0x04, 0x04];
 
-    let inner_message =
-        Nas5gsMessage::new_5gsm(
-            Nas5gsmMessageType::PduSessionEstablishmentAccept,
-            Nas5gsmMessage::PduSessionEstablishmentAccept(NasPduSessionEstablishmentAccept {
-                selected_pdu_session_type: NasPduSessionType::new(0b001), // IPv4
-                authorized_qos_rules: authorized_qos_rules(),
-                session_ambr: session_ambr(),
-                fgsm_cause: None,
-                pdu_address: Some(nas_pdu_address(&ue_ipv4.octets())),
-                rq_timer_value: None,
-                s_nssai: Some(snssai(sst)),
-                always_on_pdu_session_indication: None,
-                mapped_eps_bearer_contexts: None,
-                eap_message: None,
-                authorized_qos_flow_descriptions: Some(authorized_qos_flow_descriptions(five_qi)),
-                extended_protocol_configuration_options: Some(
-                    extended_protocol_configuration_options(dns_primary, dns_secondary, true),
-                ),
-                dnn: Some(nas_dnn(&pdu_session.dnn)),
-                fgsm_network_feature_support: None,
-                serving_plmn_rate_control: None,
-                atsss_container: None,
-                control_plane_only_indication: None,
-                ip_header_compression_configuration: None,
-                ethernet_header_compression_configuration: None,
-                service_level_aa_container: None,
-                received_mbs_container: None,
-            }),
-            pdu_session.id,
-            pti,
-        );
+    // Work around limitation in NAS library.  SSC Mode and Selected Session Type are
+    // half byte V fields (24.501, table 8.3.2.1.1).  NasPduSessionType wrongly includes
+    // a type field.  However, since NasPduSessionType::encode() ORs the type field with
+    // the value field we can get the right behaviour by putting the SSC mode in the type field.
+    let ssc_mode_and_selected_session_type = NasPduSessionType {
+        type_field: 0b0001_0000, // SSC mode 1
+        value: 0b0000_0001,      // session type IPv4
+    };
+
+    let inner_message = Nas5gsMessage::new_5gsm(
+        Nas5gsmMessageType::PduSessionEstablishmentAccept,
+        Nas5gsmMessage::PduSessionEstablishmentAccept(NasPduSessionEstablishmentAccept {
+            selected_pdu_session_type: ssc_mode_and_selected_session_type,
+            authorized_qos_rules: authorized_qos_rules(qfi),
+            session_ambr: session_ambr(),
+            fgsm_cause: None,
+            pdu_address: Some(nas_pdu_address(&ue_ipv4.octets())),
+            rq_timer_value: None,
+            s_nssai: Some(snssai(sst)),
+            always_on_pdu_session_indication: None,
+            mapped_eps_bearer_contexts: None,
+            eap_message: None,
+            authorized_qos_flow_descriptions: Some(authorized_qos_flow_descriptions(qfi, five_qi)),
+            extended_protocol_configuration_options: Some(extended_protocol_configuration_options(
+                dns_primary,
+                dns_secondary,
+                true,
+            )),
+            dnn: Some(nas_dnn(&pdu_session.dnn)),
+            fgsm_network_feature_support: None,
+            serving_plmn_rate_control: None,
+            atsss_container: None,
+            control_plane_only_indication: None,
+            ip_header_compression_configuration: None,
+            ethernet_header_compression_configuration: None,
+            service_level_aa_container: None,
+            received_mbs_container: None,
+        }),
+        pdu_session.id,
+        pti,
+    );
     let inner_message = encode_nas_5gs_message(&inner_message)?;
     let outer_message = Nas5gsMessage::new_5gmm(
         Nas5gmmMessageType::DlNasTransport,
         Nas5gmmMessage::DlNasTransport(NasDlNasTransport {
             payload_container_type: NasPayloadContainerType::new(0b0001), // 5GSM
             payload_container: NasPayloadContainer::new(inner_message),
-            pdu_session_id: None,
+            pdu_session_id: Some(NasPduSessionIdentity2::new(pdu_session.id)),
             additional_information: None,
             fgmm_cause: None,
             back_off_timer_value: None,
@@ -297,7 +308,7 @@ fn extended_protocol_configuration_options(
     epco.extend_from_slice(&[
         0x00, 0x10, // Link MTU
         0x02, // Length
-        0x05, 0xdc, // 1500
+        0x05, 0x78, // 1400
     ]);
     NasExtendedProtocolConfigurationOptions::new(epco)
 }

@@ -171,13 +171,16 @@ pub fn authentication_response() -> Result<Vec<u8>> {
     Ok(encode_nas_5gs_message(&message)?)
 }
 
-pub fn authentication_failure() -> Result<Vec<u8>> {
-    const SYNCH_FAILURE: u8 = 0b00010101; // TS24.501, Table 9.11.3.2.1
+// TODO: commonize with QCore
+pub const SYNCH_FAILURE: u8 = 0b00010101; // TS24.501, Table 9.11.3.2.1
+pub const NGKSI_IN_USE: u8 = 0b01000111;
+
+pub fn authentication_failure(cause: u8) -> Result<Vec<u8>> {
     let authentication_failure_parameter_ie = vec![
         85, 107, 146, 161, 234, 64, 160, 75, 103, 130, 213, 245, 143, 62,
     ];
     let message = Nas5gmmMessage::AuthenticationFailure(NasAuthenticationFailure {
-        fgmm_cause: NasFGmmCause::new(SYNCH_FAILURE),
+        fgmm_cause: NasFGmmCause::new(cause),
         authentication_failure_parameter: Some(NasAuthenticationFailureParameter::new(
             authentication_failure_parameter_ie,
         )),
@@ -266,6 +269,12 @@ pub fn pdu_session_establishment_request(dnn: Option<&[u8]>) -> Result<Vec<u8>> 
     );
     let inner_message = encode_nas_5gs_message(&inner_message)?;
 
+    let dnn = dnn.map(|bytes| {
+        let mut v = vec![bytes.len() as u8];
+        v.extend_from_slice(bytes);
+        NasDnn::new(v)
+    });
+
     let outer_message = Nas5gsMessage::new_5gmm(
         Nas5gmmMessageType::UlNasTransport,
         Nas5gmmMessage::UlNasTransport(NasUlNasTransport {
@@ -275,7 +284,7 @@ pub fn pdu_session_establishment_request(dnn: Option<&[u8]>) -> Result<Vec<u8>> 
             old_pdu_session_id: None,
             request_type: None,
             s_nssai: None,
-            dnn: dnn.map(|bytes| NasDnn::new(bytes.to_vec())),
+            dnn,
             additional_information: None,
             ma_pdu_session_information: None,
             release_assistance_indication: None,
