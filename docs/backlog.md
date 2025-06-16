@@ -1,16 +1,17 @@
 In progress
 
+- Handle session release request
+
+- NGAP mode 
+  - Test with srsRAN
+  - clean up uplink pipeline
+  - use different forwarding tables for NGAP vs F1AP 
+  - session release
+
 -  Session establishment with real phone
    -  OnePlus
    -  Samsung
    -  Motorola
-
--  retest
-   -  NAS library crashes with unknown IEI (max number of packet filter??) on PDU session establishment (?) - see ies-moto.pcap 
-   -  GUTI registration
-   -  cause = radioNetwork / rl-failure-others (12).
- 
--  remaining SQN failure - with different SIM, with long SQN (top byte 01 not 00)?
  
 Performance
 - iperf framework

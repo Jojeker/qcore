@@ -158,37 +158,61 @@ impl<'a> MockUeF1ap<'a> {
     }
 
     pub async fn handle_rrc_reconfiguration_with_session_accept(&mut self) -> Result<()> {
-        let nas_bytes = self.handle_rrc_reconfiguration().await?;
-        self.handle_session_accept(nas_bytes)
+        let rrc = self.transport.receive_rrc_dl_dcch().await?;
+        let nas = self.handle_rrc_reconfiguration(rrc, Some(1), None).await?;
+        self.handle_session_accept(nas)
     }
 
-    async fn handle_rrc_reconfiguration(&mut self) -> Result<Vec<u8>> {
+    pub async fn handle_rrc_reconfiguration_with_session_release(&mut self) -> Result<()> {
         let rrc = self.transport.receive_rrc_dl_dcch().await?;
-        let nas_messages = match *rrc {
-            DlDcchMessageType::C1(C1_2::RrcReconfiguration(RrcReconfiguration {
-                critical_extensions:
-                    CriticalExtensions15::RrcReconfiguration(RrcReconfigurationIEs {
-                        non_critical_extension:
-                            Some(RrcReconfigurationV1530IEs {
-                                dedicated_nas_message_list: Some(x),
-                                ..
-                            }),
-                        ..
-                    }),
-                ..
-            })) => {
-                info!(
-                    &self.logger,
-                    "DlRrcMessageTransfer(RrcReconfiguration(Nas)) <<"
-                );
-                Ok(x)
-            }
-            _ => Err(anyhow!(
-                "Couldn't find NAS message list in Rrc Reconfiguration"
-            )),
-        }?;
-        let nas = nas_messages.head.0;
+        let nas = self.handle_rrc_reconfiguration(rrc, None, Some(1)).await?;
+        self.handle_session_release(nas).await
+    }
 
+    async fn handle_rrc_reconfiguration(
+        &mut self,
+        rrc: Box<DlDcchMessageType>,
+        added_drb_id: Option<u8>,
+        released_drb_id: Option<u8>,
+    ) -> Result<Vec<u8>> {
+        let DlDcchMessageType::C1(C1_2::RrcReconfiguration(RrcReconfiguration {
+            critical_extensions:
+                CriticalExtensions15::RrcReconfiguration(RrcReconfigurationIEs {
+                    radio_bearer_config:
+                        Some(RadioBearerConfig {
+                            drb_to_add_mod_list,
+                            drb_to_release_list,
+                            ..
+                        }),
+                    non_critical_extension:
+                        Some(RrcReconfigurationV1530IEs {
+                            dedicated_nas_message_list: Some(nas_messages),
+                            ..
+                        }),
+                    ..
+                }),
+            ..
+        })) = *rrc
+        else {
+            bail!("Couldn't find NAS message list or RadioBearerConfig in Rrc Reconfiguration")
+        };
+        info!(
+            &self.logger,
+            "DlRrcMessageTransfer(RrcReconfiguration(Nas)) <<"
+        );
+
+        match (added_drb_id, drb_to_add_mod_list) {
+            (Some(x), Some(y)) => assert_eq!(x, y.0.first().drb_identity.0),
+            (None, None) => (),
+            _ => bail!("Added DRBs unexpected"),
+        }
+        match (released_drb_id, drb_to_release_list) {
+            (Some(x), Some(y)) => assert_eq!(x, y.0.first().0),
+            (None, None) => (),
+            _ => bail!("Released DRBs unexpected"),
+        }
+
+        let nas = nas_messages.head.0;
         let rrc_reconfiguration_complete = Box::new(build_rrc::reconfiguration_complete(
             RrcTransactionIdentifier(0),
         ));
