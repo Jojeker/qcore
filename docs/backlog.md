@@ -1,9 +1,11 @@
 In progress
 
-- Handle session release request
+- No 'atomic_cxchg_relaxed_relaxed in intrinsics' compile error
 
+- Phone interop
+  -  PDU session release command should flow on SRB 2, not SRB 1
+    
 - NGAP mode 
-  - Test with srsRAN
   - clean up uplink pipeline
   - use different forwarding tables for NGAP vs F1AP 
   - session release
@@ -25,6 +27,8 @@ NGAP mode
 - Registration accept should piggyback on NGAP Initial Context Setup request
 
 Function gaps
+- Update / Remove a DU's served cells on Du configuraiton update, F1 Remove, disconnection
+- Large SCTP messages - e.g. unfiltered UE Capability Information
 - Deregistration accept
 - PDU session release
 - Idle / paging

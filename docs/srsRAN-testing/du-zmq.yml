@@ -1,9 +1,6 @@
 # This configuration file is adapted from the examples in the srsRAN project.  It creates a DU that talks ZMQ to the
 # srsRAN simulated UE.
 
-# To run the srsRAN Project gNB with this config, use the following command: 
-#   sudo ./gnb -c gnb_zmq.yaml
-
 f1ap:
   cu_cp_addr: 127.0.0.1            # The address of CU-CP
   bind_addr: 127.0.0.2             
@@ -44,7 +41,7 @@ cell_cfg:
 log:
   filename: /tmp/gnb.log            # Path of the log file.
   all_level: info                   # Logging level applied to all layers.
-  hex_max_size: 10000
+  hex_max_size: 1024
 
 pcap:
   mac_enable: false                 # Set to true to enable MAC-layer PCAPs.

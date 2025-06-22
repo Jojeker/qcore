@@ -1,15 +1,15 @@
 use super::prelude::*;
 use crate::{
     NasContext, UeContext,
-    data::PduSession,
+    data::{DecodedNas, PduSession},
     procedures::{
         UeMessage,
         ue_associated::{
             F1apBase, F1apModeSessionReleaseProcedure, InitialContextSetupProcedure,
             InitialUeMessageProcedure, NasBase, PduSessionResourceSetupProcedure,
             RrcReconfigurationProcedure, RrcSecurityModeProcedure, RrcSetupProcedure,
-            UeContextReleaseProcedure, UeContextSetupProcedure, UlInformationTransferProcedure,
-            UplinkNasTransportProcedure,
+            RrcUeCapabilityEnquiryProcedure, UeContextReleaseProcedure, UeContextSetupProcedure,
+            UlInformationTransferProcedure, UplinkNasProcedure, UplinkNasTransportProcedure,
         },
     },
 };
@@ -19,19 +19,24 @@ use f1ap::{
     CellGroupConfig, DlRrcMessageTransferProcedure, F1apPdu, InitiatingMessage, RrcContainer,
     SrbId, UlRrcMessageTransfer,
 };
-use ngap::{AmfUeNgapId, NgapPdu, UplinkNasTransport};
-use oxirush_nas::{Nas5gsMessage, messages::Nas5gsSecurityHeader};
+use ngap::{AmfUeNgapId, NgapPdu};
+use oxirush_nas::{
+    Nas5gmmMessage, Nas5gsMessage, Nas5gsmMessage, decode_nas_5gs_message,
+    messages::Nas5gsSecurityHeader,
+};
 use rrc::{
     C1_6, CriticalExtensions37, DedicatedNasMessage, UlDcchMessage, UlDcchMessageType,
     UlInformationTransfer, UlInformationTransferIEs,
 };
+use std::collections::VecDeque;
 
 pub struct UeProcedure<'a, A: HandlerApi> {
     base: Procedure<'a, A>,
     pub ue: &'a mut UeContext,
     receiver: &'a Receiver<UeMessage>,
     give_context: &'a mut Option<Sender<NasContext>>,
-    ping: &'a mut Option<Sender<()>>,
+    pub f1ap_release_cause: f1ap::Cause,
+    queued_messages: &'a mut VecDeque<UeMessage>,
 }
 
 impl<'a, A: HandlerApi> std::ops::Deref for UeProcedure<'a, A> {
@@ -54,14 +59,15 @@ impl<'a, A: HandlerApi> UeProcedure<'a, A> {
         logger: &'a Logger,
         receiver: &'a Receiver<UeMessage>,
         give_context: &'a mut Option<Sender<NasContext>>,
-        ping: &'a mut Option<Sender<()>>,
+        queued_messages: &'a mut VecDeque<UeMessage>,
     ) -> Self {
         UeProcedure {
             base: Procedure::new(api, logger),
             ue,
             receiver,
             give_context,
-            ping,
+            f1ap_release_cause: f1ap::Cause::RadioNetwork(f1ap::CauseRadioNetwork::NormalRelease),
+            queued_messages,
         }
     }
 
@@ -69,7 +75,16 @@ impl<'a, A: HandlerApi> UeProcedure<'a, A> {
         if self.ngap_mode() {
             InitialContextSetupProcedure::new(self).run(kgnb).await
         } else {
-            RrcSecurityModeProcedure::new(self).run(kgnb).await
+            // TODO: this should be a procedure of its own.  This function should not contain the implementation of
+            // 'ran ue registration'.  It should just swtich to ngap::RanUeRegistration or f1ap::.
+            let s = RrcSecurityModeProcedure::new(self).run(kgnb).await?;
+
+            let s = if s.ue.rat_capabilities.is_none() {
+                RrcUeCapabilityEnquiryProcedure::new(s).run().await?
+            } else {
+                s
+            };
+            Ok(s)
         }
     }
 
@@ -127,10 +142,29 @@ impl<'a, A: HandlerApi> UeProcedure<'a, A> {
         }
     }
 
+    pub async fn ran_context_release(self) -> Result<()> {
+        if self.ngap_mode() {
+            bail!("Ran context release not yet implemented in NGAP mode")
+        } else {
+            UeContextReleaseProcedure::new(self).run().await
+        }
+    }
+
+    // TODO move these into a different trait and/or file "Dispatcher"?
+    // Return Err if the UE handler should exit.
     pub async fn dispatch(self) -> Result<()> {
-        match self.receiver.recv().await? {
+        // Process any queued messages before going to the inbox.
+        let next_message = if let Some(message) = self.queued_messages.pop_front() {
+            message
+        } else {
+            self.receiver.recv().await?
+        };
+
+        match next_message {
             UeMessage::Ngap(pdu) => self.ngap_dispatch(pdu).await,
             UeMessage::F1ap(pdu) => self.f1ap_dispatch(pdu).await,
+            UeMessage::Rrc(pdu) => self.rrc_dispatch(pdu).await,
+            UeMessage::Nas(pdu) => self.nas_dispatch(pdu).await,
             UeMessage::TakeContext(sender) => {
                 info!(
                     &self.logger,
@@ -140,10 +174,15 @@ impl<'a, A: HandlerApi> UeProcedure<'a, A> {
                 Err(anyhow!("Take context"))
             }
             UeMessage::Ping(sender) => {
-                *(self.ping) = Some(sender);
+                debug!(self.logger, "Respond to ping");
+                sender.send(()).await?;
                 Ok(())
             }
         }
+    }
+
+    async fn nas_dispatch(self, pdu: DecodedNas) -> Result<()> {
+        UplinkNasProcedure::new(self).run(pdu).await
     }
 
     // Return Err if the UE handler should exit.
@@ -159,6 +198,12 @@ impl<'a, A: HandlerApi> UeProcedure<'a, A> {
                     .run(Box::new(r))
                     .await?
             }
+            NgapPdu::InitiatingMessage(
+                ngap::InitiatingMessage::UeRadioCapabilityInfoIndication(_r),
+            ) => {
+                self.log_message(">> Ngap UeRadioCapabilityInfoIndication");
+                debug!(self.logger, "Ignoring UeRadioCapabilityInfoIndication");
+            }
             pdu => {
                 bail!("Unsupported NgapPdu {pdu:?}");
             }
@@ -166,9 +211,21 @@ impl<'a, A: HandlerApi> UeProcedure<'a, A> {
         Ok(())
     }
 
-    // TODO move into a different trait Dispatcher?
-    // Return Err if the UE handler should exit.
-    async fn f1ap_dispatch(self, pdu: Box<F1apPdu>) -> Result<()> {
+    async fn rrc_dispatch(self, mut rrc: Box<UlDcchMessage>) -> Result<()> {
+        match &mut rrc.message {
+            UlDcchMessageType::C1(C1_6::UlInformationTransfer(ul_information_transfer)) => {
+                UlInformationTransferProcedure::new(self)
+                    .run(ul_information_transfer)
+                    .await?
+            }
+            _ => {
+                bail!("Unsupported UlDcchMessage {rrc:?}");
+            }
+        }
+        Ok(())
+    }
+
+    async fn f1ap_dispatch(mut self, pdu: Box<F1apPdu>) -> Result<()> {
         match *pdu {
             F1apPdu::InitiatingMessage(InitiatingMessage::InitialUlRrcMessageTransfer(r)) => {
                 self.log_message(">> F1ap InitialUlRrcMessageTransfer");
@@ -176,22 +233,16 @@ impl<'a, A: HandlerApi> UeProcedure<'a, A> {
             }
             F1apPdu::InitiatingMessage(InitiatingMessage::UlRrcMessageTransfer(r)) => {
                 self.log_message(">> F1ap UlRrcMessageTransfer");
-                let mut rrc = self.extract_ul_dcch_message(&r)?;
-                match &mut rrc.message {
-                    UlDcchMessageType::C1(C1_6::UlInformationTransfer(ul_information_transfer)) => {
-                        UlInformationTransferProcedure::new(self)
-                            .run(ul_information_transfer)
-                            .await?
-                    }
-                    _ => {
-                        bail!("Unsupported UlDcchMessage {rrc:?}");
-                    }
-                }
+                let rrc = self.extract_ul_dcch_message(&r)?;
+                self.rrc_dispatch(rrc).await?;
             }
             F1apPdu::InitiatingMessage(InitiatingMessage::UeContextReleaseRequest(r)) => {
-                UeContextReleaseProcedure::new(self)
-                    .du_initiated(&r)
-                    .await?;
+                self.log_message(">> F1ap UeContextReleaseRequest");
+                info!(
+                    self.logger,
+                    "DU initiated context release, cause {:?}", r.cause
+                );
+                self.f1ap_release_cause = r.cause.clone();
                 bail!("Context release");
             }
             pdu => {
@@ -201,48 +252,119 @@ impl<'a, A: HandlerApi> UeProcedure<'a, A> {
         Ok(())
     }
 
-    async fn receive_pdu(&mut self) -> Result<UeMessage> {
+    /// Receive an NGAP or F1AP message mid-procedure.  
+    ///
+    /// The caller provides a filter that skips over any unwanted messages.  The caller
+    /// may also call enqueue_message() itself if more complex filtering is needed.
+    ///
+    /// Attempting to queue certain messages will immediately fail and abort the procedure - for example
+    /// a Ue Context release request from the DU.  Otherwise, a queue message will be processed later in dispatch().
+    ///
+    /// The TakeContext message immediately causes any procedure to abort.
+    async fn receive_xxap_pdu<T, BoxP>(
+        &mut self,
+        filter: fn(BoxP) -> Result<T, BoxP>,
+        expected: &str,
+    ) -> Result<T>
+    where
+        BoxP: TryFrom<UeMessage, Error = UeMessage> + Into<UeMessage>,
+    {
         loop {
-            match self.receiver.recv().await? {
-                UeMessage::TakeContext(sender) => {
-                    *self.give_context = Some(sender);
-                    bail!("Take context")
+            let msg = self.receiver.recv().await?;
+            let msg = match BoxP::try_from(msg) {
+                Ok(pdu) => match filter(pdu) {
+                    Ok(extracted) => return Ok(extracted),
+                    Err(pdu) => pdu.into(),
+                },
+                Err(msg) => msg,
+            };
+            debug!(self.logger, "Queue message (wanted {expected})");
+            self.enqueue_message(msg)?; // e.g. UeMessage::Ping
+        }
+    }
+
+    // Used to enqueue a message if the receiver is not ready to process it immediately.
+    fn enqueue_message(&mut self, message: UeMessage) -> Result<()> {
+        // Check for messages that should abort the procedure immediately.
+        match message {
+            UeMessage::TakeContext(sender) => {
+                *self.give_context = Some(sender);
+                bail!("Take context")
+            }
+            UeMessage::F1ap(ref m) => {
+                if let F1apPdu::InitiatingMessage(InitiatingMessage::UeContextReleaseRequest(_)) =
+                    *m.as_ref()
+                {
+                    bail!("Context release request from DU - abort current procedure");
                 }
-                UeMessage::Ping(sender) => {
-                    *self.ping = Some(sender);
+            }
+            UeMessage::Ngap(ref m) => {
+                if let NgapPdu::InitiatingMessage(
+                    ngap::InitiatingMessage::UeContextReleaseRequest(_),
+                ) = *m.as_ref()
+                {
+                    bail!("Context release request from gNB - abort current procedure");
                 }
-                x => return Ok(x),
             }
+            _ => (),
         }
+
+        self.queued_messages.push_back(message);
+        Ok(())
     }
 
-    async fn receive_f1ap_pdu(&mut self) -> Result<Box<F1apPdu>> {
-        match self.receive_pdu().await? {
-            UeMessage::F1ap(pdu) => Ok(pdu),
-            _ => {
-                bail!("Unexpected UeMessage received");
-            }
-        }
+    async fn receive_nas_inner(&mut self) -> Result<DecodedNas> {
+        let nas = if self.ngap_mode() {
+            let uplink_nas_transport = self
+                .receive_xxap_pdu(
+                    |m: Box<NgapPdu>| match *m {
+                        NgapPdu::InitiatingMessage(
+                            ngap::InitiatingMessage::UplinkNasTransport(x),
+                        ) => Ok(x),
+                        _ => Err(m),
+                    },
+                    "Uplink Nas Transport",
+                )
+                .await?;
+            uplink_nas_transport.nas_pdu.0
+        } else {
+            let ul_information_transfer = self
+                .receive_rrc(
+                    |m| match m.message {
+                        UlDcchMessageType::C1(C1_6::UlInformationTransfer(x)) => Ok(x),
+                        _ => Err(m),
+                    },
+                    "UlInformationTransfer",
+                )
+                .await?;
+
+            let UlInformationTransfer {
+                critical_extensions:
+                    CriticalExtensions37::UlInformationTransfer(UlInformationTransferIEs {
+                        dedicated_nas_message: Some(DedicatedNasMessage(nas_pdu)),
+                        ..
+                    }),
+            } = ul_information_transfer
+            else {
+                bail!("Expected DedicatedNasMessage in UlInformationTransfer")
+            };
+            nas_pdu
+        };
+
+        self.nas_decode(&nas)
     }
 
-    async fn receive_ngap_pdu(&mut self) -> Result<Box<NgapPdu>> {
-        match self.receive_pdu().await? {
-            UeMessage::Ngap(pdu) => Ok(pdu),
-            _ => {
-                bail!("Unexpected UeMessage received");
-            }
-        }
+    fn unexpected_nas_pdu(&mut self, pdu: DecodedNas, expected: &str) -> Result<()> {
+        debug!(self.logger, "Queue NAS PDU (wanted {expected})");
+        self.enqueue_message(UeMessage::Nas(pdu))?;
+        Ok(())
     }
 
-    pub fn nas_decode(&mut self, bytes: &[u8]) -> Result<Box<Nas5gsMessage>> {
-        self.ue.nas.decode(bytes, self.logger)
-    }
-
-    pub fn nas_decode_with_security_header(
+    pub fn nas_decode(
         &mut self,
         bytes: &[u8],
     ) -> Result<(Box<Nas5gsMessage>, Option<Nas5gsSecurityHeader>)> {
-        self.ue.nas.decode_with_security_header(bytes, self.logger)
+        self.ue.nas.decode(bytes, self.logger)
     }
 
     fn extract_ul_dcch_message(&self, r: &UlRrcMessageTransfer) -> Result<Box<UlDcchMessage>> {
@@ -253,24 +375,45 @@ impl<'a, A: HandlerApi> UeProcedure<'a, A> {
 
 impl<'a, A: HandlerApi> super::F1apBase for UeProcedure<'a, A> {
     /// Sends an RRC message and waits for a response.
-    async fn rrc_request<T: Send + SerDes>(
+    async fn rrc_request<T: Send + SerDes, F>(
         &mut self,
         srb_id: SrbId,
         rrc: &T,
-    ) -> Result<Box<UlDcchMessage>> {
+        filter: fn(Box<UlDcchMessage>) -> Result<F, Box<UlDcchMessage>>,
+        expected: &str,
+    ) -> Result<F> {
         // Send the request using the common code in rrc_indication().
         self.rrc_indication(srb_id, rrc).await?;
+        self.receive_rrc(filter, expected).await
+    }
 
-        // Wait for a response.
-        let pdu = self.receive_f1ap_pdu().await?;
-        let F1apPdu::InitiatingMessage(InitiatingMessage::UlRrcMessageTransfer(
-            ul_rrc_message_transfer,
-        )) = *pdu
-        else {
-            bail!("Expected UlRrcMessageTransfer, got {pdu:?}");
-        };
-        self.log_message(">> F1ap UlRrcMessageTransfer");
-        self.extract_ul_dcch_message(&ul_rrc_message_transfer)
+    async fn receive_rrc<T>(
+        &mut self,
+        filter: fn(Box<UlDcchMessage>) -> Result<T, Box<UlDcchMessage>>,
+        expected: &str,
+    ) -> Result<T> {
+        loop {
+            let ul_rrc_message_transfer = self
+                .receive_xxap_pdu(
+                    |m: Box<F1apPdu>| match *m {
+                        F1apPdu::InitiatingMessage(InitiatingMessage::UlRrcMessageTransfer(x)) => {
+                            Ok(x)
+                        }
+                        _ => Err(m),
+                    },
+                    "UlRrcMessageTransfer",
+                )
+                .await?;
+            self.log_message(">> F1ap UlRrcMessageTransfer");
+            let ul_dcch_message = self.extract_ul_dcch_message(&ul_rrc_message_transfer)?;
+            match filter(ul_dcch_message) {
+                Ok(extracted) => return Ok(extracted),
+                Err(ul_dcch_message) => {
+                    debug!(self.logger, "Queue message (wanted {expected})");
+                    self.enqueue_message(UeMessage::Rrc(ul_dcch_message))?;
+                }
+            }
+        }
     }
 
     /// Sends an RRC message.
@@ -300,47 +443,53 @@ impl<'a, A: HandlerApi> super::F1apBase for UeProcedure<'a, A> {
 }
 
 impl<'a, A: HandlerApi> NasBase for UeProcedure<'a, A> {
-    async fn nas_request(&mut self, nas: Box<Nas5gsMessage>) -> Result<Box<Nas5gsMessage>> {
-        // TODO: these two implementation should be in different files
-        if self.ngap_mode() {
-            self.nas_indication(nas).await?;
-            self.receive_ngap_pdu().await.and_then(|x| match *x {
-                NgapPdu::InitiatingMessage(ngap::InitiatingMessage::UplinkNasTransport(
-                    UplinkNasTransport { nas_pdu, .. },
-                )) => {
-                    let msg = self.nas_decode(&nas_pdu.0)?;
-                    Ok(msg)
-                }
-                _ => Err(anyhow!(
-                    "Expected DownlinkNasTransport for UE {}",
-                    self.ue.key
-                )),
-            })
-        } else {
-            let nas_bytes = self.ue.nas.encode(nas)?;
-            let rrc = crate::rrc::build::dl_information_transfer(
-                1, // TODO transaction ID
-                DedicatedNasMessage(nas_bytes),
-            );
-
-            self.rrc_request(SrbId(1), &rrc)
-                .await
-                .and_then(|x| match x.message {
-                    UlDcchMessageType::C1(C1_6::UlInformationTransfer(UlInformationTransfer {
-                        critical_extensions:
-                            CriticalExtensions37::UlInformationTransfer(UlInformationTransferIEs {
-                                dedicated_nas_message: Some(DedicatedNasMessage(response_bytes)),
-                                ..
-                            }),
-                    })) => {
-                        let msg = self.nas_decode(&response_bytes)?;
-                        Ok(msg)
-                    }
-                    _ => Err(anyhow!(
-                        "Expected RrcUlInformationTransfer with DedicatedNasMessage"
-                    )),
-                })
+    async fn receive_nas<T>(
+        &mut self,
+        filter: fn(DecodedNas) -> Result<T, DecodedNas>,
+        expected: &str,
+    ) -> Result<T> {
+        loop {
+            let nas = self.receive_nas_inner().await?;
+            match filter(nas) {
+                Ok(extracted) => return Ok(extracted),
+                Err(nas) => self.unexpected_nas_pdu(nas, expected)?,
+            }
         }
+    }
+
+    async fn receive_nas_sm<T>(
+        &mut self,
+        filter: fn(Nas5gsmMessage) -> Option<T>,
+        expected: &str,
+    ) -> Result<T> {
+        loop {
+            let nas = self.receive_nas_inner().await?;
+            if let Nas5gsMessage::Gmm(_, Nas5gmmMessage::UlNasTransport(ref ul_nas_transport)) =
+                *nas.0
+            {
+                let inner = Box::new(decode_nas_5gs_message(
+                    &ul_nas_transport.payload_container.value,
+                )?);
+                if let Nas5gsMessage::Gsm(_, nas_sm) = *inner {
+                    if let Some(extracted) = filter(nas_sm) {
+                        return Ok(extracted);
+                    }
+                }
+            }
+            // This is not the message we are looking for.  Park the top level NAS PDU.  This is rather inefficient
+            // since it means we will decode the inner message again later.
+            self.unexpected_nas_pdu(nas, expected)?;
+        }
+    }
+
+    async fn nas_request<T>(
+        &mut self,
+        nas: Box<Nas5gsMessage>,
+        filter: fn(DecodedNas) -> Result<T, DecodedNas>,
+        expected: &str,
+    ) -> Result<T> {
+        self.nas_indication(nas).await?;
+        self.receive_nas(filter, expected).await
     }
 
     async fn nas_indication(&mut self, nas: Box<Nas5gsMessage>) -> Result<()> {

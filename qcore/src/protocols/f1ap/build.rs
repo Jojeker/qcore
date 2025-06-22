@@ -10,20 +10,21 @@ use rrc::{
 use xxap::{GtpTunnel, PduSessionId, TransportLayerAddress};
 
 pub fn f1_setup_response(
-    r: F1SetupRequest,
+    transaction_id: TransactionId,
     gnb_cu_name: Option<String>,
+    served_cells: &[GnbDuServedCellsItem],
 ) -> Result<F1SetupResponse> {
     // Ask for all served cells to be activated.
     let sib2 = build_sib2().as_bytes()?;
-    let cells_to_be_activated_list = r.gnb_du_served_cells_list.map(|cells| {
-        CellsToBeActivatedList(
-            cells
-                .0
-                .map(|ref x| served_cell_to_activated(x, sib2.clone())),
-        )
-    });
+    let cells_to_be_activated_list = NonEmpty::collect(
+        served_cells
+            .iter()
+            .map(|item| served_cell_to_activated(item, sib2.clone())),
+    )
+    .map(CellsToBeActivatedList);
+
     Ok(F1SetupResponse {
-        transaction_id: r.transaction_id,
+        transaction_id,
         gnb_cu_rrc_version: RrcVersion {
             latest_rrc_version: bitvec![u8, Msb0;0, 0, 0],
             latest_rrc_version_enhanced: None,
@@ -278,7 +279,10 @@ pub fn ue_context_setup_request(
         sp_cell_ul_configured: Some(CellUlConfigured::None),
         cu_to_du_rrc_information: CuToDuRrcInformation {
             cg_config_info: None,
-            ue_capability_rat_container_list: None,
+            ue_capability_rat_container_list: ue
+                .rat_capabilities
+                .as_ref()
+                .map(|x| UeCapabilityRatContainerList(x.clone())),
             meas_config: None,
             handover_preparation_information: None,
             cell_group_config: None,
@@ -372,9 +376,6 @@ pub fn ue_context_modification_request(
     ue: &UeContext,
     _released_session: &PduSession,
 ) -> Box<UeContextModificationRequest> {
-    let srbs_to_be_released_list = Some(SrbsToBeReleasedList(nonempty![SrbsToBeReleasedItem {
-        srb_id: SrbId(2)
-    }]));
     let drbs_to_be_released_list = Some(DrbsToBeReleasedList(nonempty![DrbsToBeReleasedItem {
         drb_id: DrbId(1)
     }]));
@@ -395,7 +396,7 @@ pub fn ue_context_modification_request(
         srbs_to_be_setup_mod_list: None,
         drbs_to_be_setup_mod_list: None,
         drbs_to_be_modified_list: None,
-        srbs_to_be_released_list,
+        srbs_to_be_released_list: None,
         drbs_to_be_released_list,
         inactivity_monitoring_request: None,
         rat_frequency_priority_information: None,
@@ -482,7 +483,7 @@ pub fn ue_context_release_command(ue: &UeContext, cause: Cause) -> Box<UeContext
         gnb_du_ue_f1ap_id: ue.gnb_du_ue_f1ap_id(),
         cause,
         rrc_container: None,
-        srb_id: Some(SrbId(1)),
+        srb_id: None, // This is supplied if there is an Rrc Container to send (TS38.473, 8.3.3.2)
         old_gnb_du_ue_f1ap_id: None,
         execute_duplication: None,
         rrc_delivery_status_request: None,

@@ -3,6 +3,7 @@ use crate::{HandlerApi, NasContext, UeContext, procedures::UeMessage};
 use anyhow::Result;
 use async_std::channel::{self, Receiver, Sender};
 use slog::{Logger, debug, warn};
+use std::collections::VecDeque;
 
 pub struct UeMessageHandler<A: HandlerApi> {
     receiver: Receiver<UeMessage>,
@@ -30,7 +31,7 @@ impl<A: HandlerApi> UeMessageHandler<A> {
         let mut give_context = None;
         let mut ue = Box::new(UeContext::new(ue_id));
         let result = self.dispatch_all(&mut ue, &mut give_context).await;
-        self.cleanup(&give_context, ue).await;
+        self.cleanup(give_context, ue).await;
         result
     }
 
@@ -39,28 +40,34 @@ impl<A: HandlerApi> UeMessageHandler<A> {
         ue_context: &mut UeContext,
         give_context: &mut Option<Sender<NasContext>>,
     ) -> Result<()> {
+        let mut queue = VecDeque::new();
+        let mut result = Ok(());
         loop {
-            let mut ping = None;
-            UeProcedure::new(
+            let ue_procedure = UeProcedure::new(
                 &self.api,
                 ue_context,
                 &self.logger,
                 &self.receiver,
                 give_context,
-                &mut ping,
-            )
-            .dispatch()
-            .await?;
+                &mut queue,
+            );
 
-            if let Some(sender) = ping {
-                let _ = sender.send(()).await;
+            // On success, keep dispatching.  On error, release the RAN context as a final
+            // procedure before passing up the error.
+            if result.is_ok() {
+                result = ue_procedure.dispatch().await;
+            } else {
+                if let Err(e) = ue_procedure.ran_context_release().await {
+                    warn!(self.logger, "Failed to release RAN context: {e}");
+                }
+                return result;
             }
         }
     }
 
     async fn cleanup(
         &self,
-        give_context: &Option<Sender<NasContext>>,
+        give_context: Option<Sender<NasContext>>,
         mut ue_context: Box<UeContext>,
     ) {
         // Remove the channel to this UE.

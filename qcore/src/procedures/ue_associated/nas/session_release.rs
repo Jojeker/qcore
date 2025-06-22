@@ -1,6 +1,9 @@
 use super::prelude::*;
 use crate::protocols::nas::FGSM_CAUSE_REGULAR_DEACTIVATION;
-use oxirush_nas::messages::{Nas5gsmHeader, NasPduSessionReleaseRequest};
+use oxirush_nas::{
+    Nas5gsmMessage,
+    messages::{Nas5gsmHeader, NasPduSessionReleaseRequest},
+};
 
 define_ue_procedure!(SessionReleaseProcedure);
 
@@ -27,6 +30,21 @@ impl<'a, A: HandlerApi> SessionReleaseProcedure<'a, A> {
             FGSM_CAUSE_REGULAR_DEACTIVATION,
         )?;
         let nas = self.ue.nas.encode(pdu_session_release_command)?;
-        self.0.ran_session_release(&released_session, nas).await
+        self.log_message("<< Nas PduSessionReleaseCommand");
+        self.0 = self.0.ran_session_release(&released_session, nas).await?;
+
+        let _pdu_session_release_complete = self
+            .receive_nas_sm(
+                |nas| match nas {
+                    Nas5gsmMessage::PduSessionReleaseComplete(x) => Some(x),
+                    _ => None,
+                },
+                "Pdu session release complete",
+            )
+            .await?;
+
+        // TODO check session identity
+
+        Ok(self.0)
     }
 }

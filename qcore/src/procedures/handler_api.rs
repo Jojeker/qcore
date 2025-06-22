@@ -1,29 +1,18 @@
-use crate::{Config, NasContext, SubscriberAuthParams, UserplaneSession, nas::Tmsi};
+use crate::{
+    Config, NasContext, SubscriberAuthParams, UserplaneSession, nas::Tmsi, procedures::UeMessage,
+    qcore::ServedCellsStore,
+};
 use anyhow::Result;
-use async_std::channel::Sender;
 use async_trait::async_trait;
-use f1ap::F1apPdu;
-use ngap::NgapPdu;
 use slog::Logger;
 use xxap::{Indication, Procedure, RequestError};
-
-#[derive(Debug)]
-pub enum UeMessage {
-    F1ap(Box<F1apPdu>),
-    Ngap(Box<NgapPdu>),
-    TakeContext(Sender<NasContext>),
-
-    // Send this message to a message handler to get a notification when the current procedure has finished processing.
-    // Useful for testing purposes, to ensure that QCore has finished processing a response that the test framework
-    // has sent in.
-    Ping(Sender<()>),
-}
 
 /// Trait representing the collection of services needed by QCore procedure handlers.
 #[async_trait]
 pub trait HandlerApi: Send + Sync + Clone + 'static {
     fn config(&self) -> &Config;
     fn ngap_mode(&self) -> bool;
+    fn served_cells(&self) -> &ServedCellsStore;
 
     // Returns the K, OPC and SQN, and increments the SQN.
     // The returned SQN is the one _before_ the increment.  This means that

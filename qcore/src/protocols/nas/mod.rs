@@ -7,6 +7,9 @@ pub mod build;
 pub mod parse;
 
 // TS24.501, Table 9.11.3.2.1
+
+pub const ABORT_PROCEDURE: u8 = 0;
+#[allow(dead_code)]
 pub const FGMM_CAUSE_ILLEGAL_UE: u8 = 0b00000011;
 #[allow(dead_code)]
 pub const FGMM_CAUSE_IMPLICITLY_DEREGISTERED: u8 = 0b00001010;
@@ -49,29 +52,4 @@ impl Display for AmfIds {
 pub enum MobileIdentity {
     Supi(PlmnIdentity, Imsi),
     Guti(PlmnIdentity, AmfIds, Tmsi),
-}
-
-#[macro_export]
-macro_rules! ensure_nas {
-    ($t:ident, $boxed_nas:expr) => {
-        match *$boxed_nas {
-            oxirush_nas::Nas5gsMessage::Gmm(_header, oxirush_nas::Nas5gmmMessage::$t(message)) => {
-                message
-            }
-            m => bail!("Expected Nas {} but got {:?}", stringify!($t), m),
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! expect_nas {
-    ($t:ident, $boxed_nas:expr) => {{
-        let b = $boxed_nas;
-        match *b {
-            oxirush_nas::Nas5gsMessage::Gmm(_header, oxirush_nas::Nas5gmmMessage::$t(message)) => {
-                Ok(message)
-            }
-            _ => Err(b),
-        }
-    }};
 }

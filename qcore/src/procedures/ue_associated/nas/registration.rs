@@ -1,15 +1,16 @@
 use super::prelude::*;
-use crate::ensure_nas;
-use crate::expect_nas;
 use crate::nas::*;
+use crate::nas_filter;
+use crate::nas_request_filter;
 use crate::{SimCreds, SubscriberAuthParams};
+use oxirush_nas::Nas5gmmMessage;
+use oxirush_nas::Nas5gsMessage;
 use oxirush_nas::messages::{
     Nas5gsSecurityHeader, NasAuthenticationFailure, NasAuthenticationResponse,
     NasRegistrationRequest, NasSecurityModeComplete,
 };
 use oxirush_nas::{
-    Nas5gsMessage, Nas5gsSecurityHeaderType, NasMessageContainer, NasUeSecurityCapability,
-    decode_nas_5gs_message,
+    Nas5gsSecurityHeaderType, NasMessageContainer, NasUeSecurityCapability, decode_nas_5gs_message,
 };
 use security::{Challenge, resync_sqn};
 
@@ -52,7 +53,13 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
                 self.0 = self.0.ran_ue_registration(&kgnb).await?;
                 self.accept_registration().await?;
             }
-            Err(cause) => self.reject_registration(cause).await?,
+            Err(cause) => {
+                if cause != ABORT_PROCEDURE {
+                    self.reject_registration(cause).await?
+                } else {
+                    bail!("Abort registration procedure")
+                }
+            }
         }
 
         Ok(())
@@ -78,7 +85,13 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
             .await;
         self.ue.tmsi = Some(tmsi);
         self.log_message("<< NasRegistrationAccept");
-        let _rsp = ensure_nas!(RegistrationComplete, self.nas_request(r).await?);
+        let _rsp = self
+            .nas_request(
+                r,
+                nas_filter!(RegistrationComplete),
+                "Registration complete",
+            )
+            .await?;
         self.log_message(">> NasRegistrationComplete");
         Ok(())
     }
@@ -125,9 +138,11 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
     async fn query_ue_identity_inner(&mut self) -> Result<Imsi> {
         let r = crate::nas::build::identity_request();
         self.log_message("<< NasIdentityRequest");
-        let rsp = ensure_nas!(IdentityResponse, self.nas_request(r).await?);
-        self.log_message(">> NasSecurityModeComplete");
-        crate::nas::parse::identity_response(rsp)
+        let rsp = self
+            .nas_request(r, nas_filter!(IdentityResponse), "Identity response")
+            .await?;
+        self.log_message(">> NasIdentityResponse");
+        crate::nas::parse::identity_response(&rsp)
     }
 
     async fn supi_registration(
@@ -137,20 +152,17 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
     ) -> Result<(), u8> {
         info!(self.logger, "SUPI registration for imsi-{imsi}");
 
-        self.authenticate_ue(imsi).await.map_err(|e| {
-            warn!(self.logger, "Authentication failure - {e}");
-            FGMM_CAUSE_ILLEGAL_UE
-        })?;
+        self.authenticate_ue(imsi).await?;
 
         self.activate_nas_security(ue_security_capability)
             .await
             .map_err(|e| {
                 warn!(self.logger, "NAS security failure - {e}");
-                FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED
+                ABORT_PROCEDURE
             })
     }
 
-    async fn authenticate_ue(&mut self, imsi: &str) -> Result<()> {
+    async fn authenticate_ue(&mut self, imsi: &str) -> Result<(), u8> {
         let mut ksi_retry_done = false;
         let mut resync_retry_done = false;
         loop {
@@ -164,12 +176,18 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
                     continue;
                 }
                 NasAuthOutcome::ResyncSqn(sqn) if !resync_retry_done => {
-                    self.resync_subscriber_sqn(imsi, sqn).await?;
+                    self.resync_subscriber_sqn(imsi, sqn).await.map_err(|e| {
+                        warn!(self.logger, "Resync signature failure - {e}");
+                        ABORT_PROCEDURE
+                    })?;
                     resync_retry_done = true;
                     debug!(self.logger, "Resynchronized SQN to UE {:02x?}", sqn);
                     continue;
                 }
-                x => bail!("Successive auth failures {:?}", x),
+                x => {
+                    warn!(self.logger, "Successive auth failures {:?}", x);
+                    return Err(ABORT_PROCEDURE);
+                }
             }
         }
     }
@@ -181,13 +199,25 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
         self.configure_nas_security(&ue_security_capabilities);
         let r = crate::nas::build::security_mode_command(ue_security_capabilities, self.ue.ksi);
         self.log_message("<< NasSecurityModeCommand");
-        let rsp = ensure_nas!(SecurityModeComplete, self.nas_request(r).await?);
+        let Ok(security_mode_complete) = self
+            .nas_request(
+                r,
+                nas_request_filter!(SecurityModeComplete, SecurityModeReject),
+                "Security Mode response",
+            )
+            .await?
+        else {
+            bail!("Security mode command failed");
+        };
         self.log_message(">> NasSecurityModeComplete");
-        self.check_nas_security_mode_complete(rsp)
+        self.check_nas_security_mode_complete(Box::new(security_mode_complete))
     }
 
-    async fn perform_nas_authentication(&mut self, imsi: &str) -> Result<NasAuthOutcome> {
-        let (challenge, auth_params) = self.generate_challenge(imsi).await?;
+    async fn perform_nas_authentication(&mut self, imsi: &str) -> Result<NasAuthOutcome, u8> {
+        let (challenge, auth_params) = self.generate_challenge(imsi).await.map_err(|e| {
+            warn!(self.logger, "While generating challenge - {e}");
+            FGMM_CAUSE_ILLEGAL_UE
+        })?;
         let req = crate::nas::build::authentication_request(
             &challenge.rand,
             &challenge.autn,
@@ -195,23 +225,39 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
         );
 
         self.log_message("<< NasAuthenticationRequest");
-        match expect_nas!(AuthenticationResponse, self.nas_request(req).await?) {
+        match self
+            .nas_request(
+                req,
+                nas_request_filter!(AuthenticationResponse, AuthenticationFailure),
+                "Authentication result",
+            )
+            .await
+            .map_err(|e| {
+                warn!(
+                    self.logger,
+                    "While waiting for authentication response - {e}"
+                );
+                ABORT_PROCEDURE
+            })? {
             Ok(rsp) => {
                 self.log_message(">> NasAuthenticationResponse");
-                self.check_authentication_response(&rsp, &challenge)?;
+                self.check_authentication_response(&rsp, &challenge)
+                    .map_err(|e| {
+                        warn!(self.logger, "Bad authentication respnse - {e}");
+                        ABORT_PROCEDURE
+                    })?;
                 Ok(NasAuthOutcome::Kseaf(challenge.kseaf))
             }
-            Err(m) => self.authentication_failure(m, &auth_params, &challenge.rand),
+            Err(m) => self.authentication_failure(&m, &auth_params, &challenge.rand),
         }
     }
 
     fn authentication_failure(
         &mut self,
-        rsp: Box<Nas5gsMessage>,
+        auth_failure: &NasAuthenticationFailure,
         auth_params: &SubscriberAuthParams,
         rand: &[u8; 16],
-    ) -> Result<NasAuthOutcome> {
-        let auth_failure = ensure_nas!(AuthenticationFailure, rsp);
+    ) -> Result<NasAuthOutcome, u8> {
         self.log_message(">> NasAuthenticationFailure");
         match auth_failure.fgmm_cause.value {
             FGMM_CAUSE_SYNCH_FAILURE => {
@@ -226,7 +272,7 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
                             );
                             Ok(NasAuthOutcome::ResyncSqn(auth_params.sqn.0))
                         } else {
-                            Err(e)
+                            Err(ABORT_PROCEDURE)
                         }
                     }
                 }
@@ -236,21 +282,22 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
                 Ok(NasAuthOutcome::RetryWithNewKSI)
             }
             cause => {
-                bail!("Authentication failure cause {cause}");
+                warn!(self.logger, "UE failed authentication with cause {cause}");
+                Err(cause)
             }
         }
     }
 
     fn try_sqn_resynchronization(
         &mut self,
-        m: NasAuthenticationFailure,
+        m: &NasAuthenticationFailure,
         sim_creds: &SimCreds,
         rand: &[u8; 16],
     ) -> Result<[u8; 6]> {
-        let Some(auts) = m.authentication_failure_parameter else {
+        let Some(ref auts) = m.authentication_failure_parameter else {
             bail!("Missing authentication failure parameter on NAS authentication synch failure");
         };
-        let Ok(auts) = auts.value.try_into() else {
+        let Ok(auts) = auts.value.clone().try_into() else {
             bail!(
                 "Bad authentication failure parameter length on NAS authentication synch failure",
             );
@@ -450,9 +497,9 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
 
     fn check_nas_security_mode_complete(
         &mut self,
-        security_mode_complete: NasSecurityModeComplete,
+        security_mode_complete: Box<NasSecurityModeComplete>,
     ) -> Result<()> {
-        match security_mode_complete {
+        match *security_mode_complete {
             NasSecurityModeComplete {
                 imeisv: _imeisv,
                 nas_message_container: Some(NasMessageContainer { value, .. }),
@@ -467,10 +514,24 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
                     Box::new(decode_nas_5gs_message(&value).map_err(|e| {
                         anyhow!("NAS decode error - {e} - message bytes: {:?}", value)
                     })?);
-                let _registration_request = ensure_nas!(RegistrationRequest, nas);
+                if let Nas5gsMessage::Gmm(
+                    _,
+                    Nas5gmmMessage::RegistrationRequest(_registration_request),
+                ) = *nas
+                {
+                    // TODO: do something with the registration request
+                } else {
+                    bail!(
+                        "Security mode complete contained non-registration nas message {:?}",
+                        nas
+                    )
+                };
             }
-            m => {
-                warn!(self.logger, "Registration request missing from {:?}", m)
+            _ => {
+                warn!(
+                    self.logger,
+                    "Registration request missing from {:?}", security_mode_complete
+                );
             }
         }
 

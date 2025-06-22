@@ -1,8 +1,5 @@
-//! initial_access - procedure in which UE makes first contact with the 5G core
-
-use super::super::RegistrationProcedure;
 use super::prelude::*;
-use crate::ensure_nas;
+use crate::procedures::ue_associated::UplinkNasProcedure;
 use asn1_per::SerDes;
 use f1ap::{DuToCuRrcContainer, InitialUlRrcMessageTransfer, SrbId};
 use rrc::{
@@ -16,17 +13,9 @@ impl<'a, A: HandlerApi> RrcSetupProcedure<'a, A> {
     pub async fn run(mut self, r: Box<InitialUlRrcMessageTransfer>) -> Result<()> {
         self.ue.ran_ue_id = r.gnb_du_ue_f1ap_id.0;
         self.ue.nr_cgi = Some(r.nr_cgi.clone());
-
         let nas_bytes = self.handle_rrc_setup(r).await?;
-
-        if let Ok((nas_message, security_header)) = self.nas_decode_with_security_header(&nas_bytes)
-        {
-            let registration_request = ensure_nas!(RegistrationRequest, nas_message);
-            RegistrationProcedure::new(self.0)
-                .run(Box::new(registration_request), security_header)
-                .await?;
-        }
-        Ok(())
+        let nas = self.nas_decode(&nas_bytes)?;
+        UplinkNasProcedure::new(self.0).run(nas).await
     }
 
     async fn handle_rrc_setup(&mut self, r: Box<InitialUlRrcMessageTransfer>) -> Result<Vec<u8>> {
@@ -34,7 +23,11 @@ impl<'a, A: HandlerApi> RrcSetupProcedure<'a, A> {
         self.log_message(">> RrcSetupRequest");
         let rrc_setup = crate::rrc::build::setup(0, cell_group_config);
         self.log_message("<< RrcSetup");
-        let response = self.rrc_request(SrbId(0), &rrc_setup).await?;
+
+        // We use a filter that allows any message because the only valid message at this point is an RrcSetupComplete
+        // and we don't want to queue an unexpected message.
+        // TODO: provide a different style of filter that fails rather than queues?
+        let response = self.rrc_request(SrbId(0), &rrc_setup, Ok, "").await?;
         let nas_bytes = self.check_rrc_setup_complete(response)?;
         self.log_message(">> RrcSetupComplete");
         Ok(nas_bytes)
@@ -54,7 +47,7 @@ impl<'a, A: HandlerApi> RrcSetupProcedure<'a, A> {
             UlCcchMessage {
                 message: UlCcchMessageType::C1(C1_4::RrcSetupRequest(x)),
             } => Ok(x),
-            m => Err(anyhow!(format!("Not yet implemented Rrc message {:?}", m))),
+            m => bail!("Initial RRC message is not Rrc Setup {:?}", m),
         }
     }
 

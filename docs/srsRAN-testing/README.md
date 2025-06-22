@@ -51,7 +51,7 @@ sudo ip netns add ue1
 ### Copy across config files
 
 ```sh
-cp ~/qcore/docs/srsRAN-testing/du.yml ~/srsRAN_Project/build/apps/du
+cp ~/qcore/docs/srsRAN-testing/du-zmq.yml ~/srsRAN_Project/build/apps/du
 cp ~/qcore/docs/srsRAN-testing/ue.conf ~/srsRAN_4G/build/srsue/src
 ```
 
@@ -60,29 +60,26 @@ cp ~/qcore/docs/srsRAN-testing/ue.conf ~/srsRAN_4G/build/srsue/src
 #### Terminal 1 - tcpdump
 
 ```sh
-cd
-sudo tcpdump -w srsran_test.pcap -i any sctp or port 2152 or host 10.255.0.1
+cd && sudo tcpdump -w srsran_test.pcap -i any sctp or port 2152 or host 10.255.0.1
 ```
 
 #### Terminal 2 - QCore
 
 ```sh
 cd ~/qcore
-RUST_LOG=debug cargo run -- --mcc 001 --mnc 01 --local-ip 127.0.0.1  --f1u-interface-name lo --sim-cred-file docs/srsRAN-testing/srs-sim.toml
+RUST_LOG=debug cargo run -- --mcc 001 --mnc 01 --local-ip 127.0.0.1  --ran-interface-name lo --sim-cred-file docs/srsRAN-testing/srs-sim.toml
 ```
 
 #### Terminal 3 - DU
 
 ```sh
-cd ~/srsRAN_Project/build/apps/du
-sudo ./srsdu -c du.yml
+cd ~/srsRAN_Project/build/apps/du && sudo ./srsdu -c du-zmq.yml
 ```
 
 #### Terminal 4 - UE
 
 ```sh
-cd ~/srsRAN_4G/build/srsue/src/
-sudo ./srsue ue.conf
+cd ~/srsRAN_4G/build/srsue/src/ && sudo ./srsue ue.conf
 ```
 
 #### Terminal 5 - check connectivity from UE
