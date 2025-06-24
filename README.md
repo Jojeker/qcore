@@ -26,6 +26,8 @@ QCore is written in Rust, and has an eBPF userplane.
 The quickest way to see QCore in action is to run its mainline test.
 
 ### Set up environment
+Install Rust.
+
 ```sh
 cargo install bpf-linker
 rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
@@ -34,6 +36,7 @@ rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
 ### Configure routing + network interfaces
 For safety please read the [section below](#about-the-routing-setup) first.
 ```sh
+sudo apt install iptables
 sudo ./setup-routing
 ```
 
