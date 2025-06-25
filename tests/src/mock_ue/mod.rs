@@ -227,6 +227,8 @@ impl<T: Transport> MockUe<T> {
             bail!("Expected NasPduSessionEstablishmentAccept, got {message:?}");
         };
 
+        info!(&self.logger, "Nas PduSessionEstablishmentAccept <<");
+
         self.ipv4_addr = Ipv4Addr::new(
             nas_pdu_address_ie[1],
             nas_pdu_address_ie[2],
@@ -236,9 +238,9 @@ impl<T: Transport> MockUe<T> {
         Ok(())
     }
 
-    pub async fn send_nas_pdu_session_release(&mut self) -> Result<()> {
+    pub async fn send_nas_pdu_session_release_request(&mut self) -> Result<()> {
         let nas_session_release_request = build_nas::pdu_session_release_request()?;
-        info!(&self.logger, "NAS Pdu Session Release request >>");
+        info!(&self.logger, "Nas PduSessionReleaseRequest >>");
         self.send_nas(nas_session_release_request).await
     }
 
@@ -248,9 +250,9 @@ impl<T: Transport> MockUe<T> {
         else {
             bail!("Expected NasPduSessionReleaseCommand, got {message:?}");
         };
-        info!(&self.logger, "Nas Pdu Session Command <<");
+        info!(&self.logger, "Nas PduSessionReleaseCommand <<");
         let nas_session_release_complete = build_nas::pdu_session_release_complete()?;
-        info!(&self.logger, "Nas Pdu Session Release Complete >>");
+        info!(&self.logger, "Nas PduSessionReleaseComplete >>");
         self.send_nas(nas_session_release_complete).await
     }
 }
