@@ -1,17 +1,27 @@
 # Backlog
 
 ## In progress
-- No 'atomic_cxchg_relaxed_relaxed in intrinsics' compile error
-- PDU session release command should flow on SRB 2, not SRB 1  
+- Rejection of Registration Request from Security Mode Command if slice asked for is eMBB / SST 1 with "no network slices available"
+  -  causes OnePlus phone to reregister with MIoT SST 3 / SD 0.
+-  Unhandled RrcReestablishmentRequest
+-  See f1ap-samsung.log.
+
 - NGAP mode 
-  - ran context release
+  - move ran_session_setup_phase1 + 2 out of ue_procedure.rs
+  - if initial context setup request fails, 'unhandled message' and we don't save off the GUTI
   - Registration accept should piggyback on NGAP Initial Context Setup request
   - use different forwarding tables for NGAP vs F1AP 
-  - session release
+  - DlDropUnknownUe incrementing when no phones attached
 - Session establishment with real phone
-   -  OnePlus
-   -  Samsung
-   -  Motorola
+   -  OnePlus 
+      -  refuses to set up a session and sends a ServiceRequest
+   -  OPPO 
+      -  SQN resync not working - fixed??
+      -  Identity Request not working - registration reject?
+   -  Samsung (working)
+   -  Motorola (working)
+- "NG setup with GNB name" - log line - trace of bitvec global gnb ID is ugly 
+- PDU session release command should flow on SRB 2, not SRB 1  
  
 ## Performance
 - iperf framework
@@ -52,6 +62,8 @@
   its session setup request (with no intervening delete) after not liking the response.
 
 ## Tidying + refactoring
+- reduce test boilerplate
+- struct Config should be split into information that is used on startup (which doesn't need to be cloned), and information that is used by procedures (which does need to be cloned) 
 - give rrc its own directory under ue_associated procedures
 - avoid having to expect() on UeContext fields
 - message logs in both test framework and QCORE debug should use consistent F1 / RRC / NAS prefix

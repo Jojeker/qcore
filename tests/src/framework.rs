@@ -2,7 +2,10 @@ use crate::{MockGnb, mock_ue::Transport};
 
 use super::{DataNetwork, MockDu, MockUe};
 use anyhow::{Result, bail};
-use qcore::{AmfIds, Config, PdcpSequenceNumberLength, ProgramHandle, QCore, SubscriberDb};
+use qcore::{
+    AmfIds, Config, NetworkDisplayName, PdcpSequenceNumberLength, ProgramHandle, QCore,
+    SubscriberDb,
+};
 use slog::{Drain, Logger, o};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use xxap::PlmnIdentity;
@@ -59,10 +62,10 @@ async fn start_qcore(
     QCore::start(
         Config {
             ip_addr: addr.parse()?,
-            plmn: PlmnIdentity([0x2, 0xf8, 0x39]),
+            plmn: PlmnIdentity([0x00, 0xf1, 0x10]),
             amf_ids: AmfIds([0x01, 0x01, 0x00]),
             name: Some("QCore".to_string()),
-            serving_network_name: "5G:mnc093.mcc208.3gppnetwork.org".to_string(),
+            serving_network_name: "5G:mnc001.mcc01.3gppnetwork.org".to_string(),
             skip_ue_authentication_check: true, // saves us having to implement milenage etc in test framework
             sst: 1,
             ran_interface_name: "lo".to_string(),
@@ -70,7 +73,8 @@ async fn start_qcore(
             tun_interface_name: "qcoretun".to_string(),
             ue_subnet: Ipv4Addr::new(10, 255, 0, 0),
             pdcp_sn_length: PdcpSequenceNumberLength::TwelveBits,
-            five_qi: 1,
+            five_qi: 7,
+            network_display_name: NetworkDisplayName::new("QCoreTest")?,
         },
         logger.new(o!("qcore"=> 1)),
         sub_db,

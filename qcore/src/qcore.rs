@@ -14,9 +14,8 @@ use async_std::{
 };
 use async_trait::async_trait;
 use aya::Ebpf;
-use dashmap::DashMap;
 use f1ap::GnbDuServedCellsItem;
-use slog::{Logger, info, o, warn};
+use slog::{Logger, debug, info, o, warn};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::ops::Deref;
@@ -37,7 +36,7 @@ pub struct QCore {
     logger: Logger,
     server_handle: Arc<Mutex<Option<ShutdownHandle>>>,
     packet_processor: PacketProcessor,
-    ue_tasks: Arc<DashMap<u32, Sender<UeMessage>>>,
+    ue_tasks: Arc<Mutex<HashMap<u32, Sender<UeMessage>>>>,
     sub_db: Arc<Mutex<SubscriberDb>>,
     tmsis: Arc<Mutex<HashMap<Tmsi, NasContextLocator>>>,
     served_cells: ServedCellsStore,
@@ -108,7 +107,7 @@ impl QCore {
             stack: Stack::new(SctpTransportProvider::new()),
             logger,
             server_handle: Arc::new(Mutex::new(None)),
-            ue_tasks: Arc::new(DashMap::new()),
+            ue_tasks: Arc::new(Mutex::new(HashMap::new())),
             packet_processor,
             sub_db: Arc::new(Mutex::new(sub_db)),
             tmsis: Arc::new(Mutex::new(HashMap::new())),
@@ -165,11 +164,23 @@ impl QCore {
     /// Testability API to wait until all UE message handlers have processed all pending
     /// procedures.
     pub async fn wait_until_idle(&self) {
-        let tasks = self.ue_tasks.iter();
-        for task in tasks {
+        debug!(self.logger, "Wait until idle");
+
+        // Make a copy of the task IDs, to avoid holding a lock when iterating waiting for replies below.
+        let task_ids: Vec<u32> = self.ue_tasks.lock().await.iter().map(|x| *x.0).collect();
+
+        // Ping each task
+        for task_id in task_ids.into_iter() {
+            debug!(self.logger, "Ping UE task");
             let (sender, receiver) = channel::bounded(1);
-            let _ = task.send(UeMessage::Ping(sender)).await;
-            let _ = receiver.recv().await;
+            if self
+                .dispatch_ue_message(task_id, UeMessage::Ping(sender))
+                .await
+                .is_ok()
+            {
+                let _ = receiver.recv().await;
+            }
+            debug!(self.logger, "Ping UE task done");
         }
     }
 
@@ -228,7 +239,7 @@ impl HandlerApi for QCore {
         let mut sqn = Sqn(sqn);
 
         // After a resync we need to add 1 to both the IND and SEQ parts of the SQN.  See TS33.102.
-        const RESYNC_SQN_INCREMENT: u8 = 33;
+        const RESYNC_SQN_INCREMENT: u8 = 32; // temp hack
         sqn.add(RESYNC_SQN_INCREMENT);
 
         self.sub_db
@@ -282,20 +293,21 @@ impl HandlerApi for QCore {
         .await
     }
 
-    fn spawn_ue_message_handler(&self) -> u32 {
+    async fn spawn_ue_message_handler(&self) -> u32 {
         let mut ue_id = rand::random::<u32>();
-        while self.ue_tasks.contains_key(&ue_id) {
+
+        while self.ue_tasks.lock().await.contains_key(&ue_id) {
             ue_id = rand::random::<u32>();
         }
 
         let sender =
             UeMessageHandler::spawn(ue_id, self.clone(), self.logger.new(o!("ue_id" => ue_id)));
-        self.ue_tasks.insert(ue_id, sender);
+        self.ue_tasks.lock().await.insert(ue_id, sender);
         ue_id
     }
 
     async fn dispatch_ue_message(&self, ue_id: u32, message: UeMessage) -> Result<()> {
-        if let Some(sender) = self.ue_tasks.get(&ue_id) {
+        if let Some(sender) = self.ue_tasks.lock().await.get(&ue_id) {
             sender.send(message).await?;
         } else {
             bail!("UE {ue_id} not found");
@@ -303,12 +315,12 @@ impl HandlerApi for QCore {
         Ok(())
     }
 
-    fn delete_ue_channel(&self, ue_id: u32) {
-        self.ue_tasks.remove(&ue_id);
+    async fn delete_ue_channel(&self, ue_id: u32) {
+        self.ue_tasks.lock().await.remove(&ue_id);
     }
 
-    fn delete_ue_channels(&self) {
-        self.ue_tasks.clear();
+    async fn delete_ue_channels(&self) {
+        self.ue_tasks.lock().await.clear();
     }
 
     async fn xxap_request<P: Procedure>(

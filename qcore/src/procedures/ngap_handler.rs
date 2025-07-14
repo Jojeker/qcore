@@ -37,7 +37,7 @@ impl<A: HandlerApi> RequestProvider<ngap::NgSetupProcedure> for NgapHandler<A> {
 #[async_trait]
 impl<A: HandlerApi> IndicationHandler<ngap::InitialUeMessageProcedure> for NgapHandler<A> {
     async fn handle(&self, i: InitialUeMessage, logger: &Logger) {
-        let id = self.0.spawn_ue_message_handler();
+        let id = self.0.spawn_ue_message_handler().await;
         if let Err(e) = self
             .dispatch_ue_message(
                 id,
@@ -60,6 +60,23 @@ impl<A: HandlerApi> IndicationHandler<ngap::UplinkNasTransportProcedure> for Nga
                 i.amf_ue_ngap_id.0 as u32,
                 UeMessage::Ngap(Box::new(NgapPdu::InitiatingMessage(
                     InitiatingMessage::UplinkNasTransport(i),
+                ))),
+            )
+            .await
+        {
+            warn!(logger, "Failed to dispatch UplinkNasTransport - {}", e);
+        }
+    }
+}
+
+#[async_trait]
+impl<A: HandlerApi> IndicationHandler<ngap::UeContextReleaseRequestProcedure> for NgapHandler<A> {
+    async fn handle(&self, i: ngap::UeContextReleaseRequest, logger: &Logger) {
+        if let Err(e) = self
+            .dispatch_ue_message(
+                i.amf_ue_ngap_id.0 as u32,
+                UeMessage::Ngap(Box::new(NgapPdu::InitiatingMessage(
+                    InitiatingMessage::UeContextReleaseRequest(i),
                 ))),
             )
             .await
