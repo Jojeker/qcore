@@ -10,10 +10,11 @@ impl<'a, A: HandlerApi> RrcReconfigurationProcedure<'a, A> {
     pub async fn add_session(
         self,
         nas: Vec<u8>,
-        session_index: usize,
         cell_group_config: Vec<u8>,
     ) -> Result<UeProcedure<'a, A>> {
-        let session = &self.ue.pdu_sessions[session_index];
+        // TODO - support >1 session
+        let session_index = 0usize;
+        let session = &self.ue.core.pdu_sessions[session_index];
         let rrc_reconfiguration = crate::rrc::build::reconfiguration(
             0,
             Some(nonempty![nas]),

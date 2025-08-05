@@ -1,6 +1,6 @@
 use crate::{
     DuUeContext, MockDu, MockUe,
-    mock_ue::{Transport, build_rrc},
+    mock_ue::{MockUe5GCData, Transport, build_rrc},
     packet::Packet,
 };
 use anyhow::{Result, anyhow, bail};
@@ -27,13 +27,25 @@ impl DerefMut for MockUeF1ap<'_> {
         &mut self.base
     }
 }
+
+impl From<MockUeF1ap<'_>> for MockUe5GCData {
+    fn from(val: MockUeF1ap<'_>) -> Self {
+        val.base.data
+    }
+}
+
 pub struct UeF1apMode<'a> {
     du: &'a MockDu,
     pub du_ue_context: DuUeContext,
+    nas: Option<Vec<u8>>,
 }
 impl<'a> UeF1apMode<'a> {
     pub fn new(du: &'a MockDu, du_ue_context: DuUeContext) -> Self {
-        UeF1apMode { du, du_ue_context }
+        UeF1apMode {
+            du,
+            du_ue_context,
+            nas: None,
+        }
     }
 
     async fn send_initial_ul_rrc(&mut self, rrc_setup_request: UlCcchMessage) -> Result<()> {
@@ -57,13 +69,22 @@ impl<'a> UeF1apMode<'a> {
 
 #[async_trait]
 impl<'a> Transport for UeF1apMode<'a> {
-    async fn send_nas(&mut self, nas_bytes: Vec<u8>, logger: &Logger) -> Result<()> {
+    async fn send_nas(
+        &mut self,
+        nas_bytes: Vec<u8>,
+        _guti: &Option<[u8; 10]>,
+        logger: &Logger,
+    ) -> Result<()> {
         let rrc = build_rrc::ul_information_transfer(nas_bytes);
         info!(logger, "Rrc UlInformationTransfer >>");
         self.du.send_ul_rrc(&mut self.du_ue_context, &rrc).await
     }
 
     async fn receive_nas(&mut self, logger: &Logger) -> Result<Vec<u8>> {
+        if let Some(nas) = std::mem::take(&mut self.nas) {
+            return Ok(nas);
+        }
+
         match *self.du.receive_rrc_dl_dcch(&mut self.du_ue_context).await? {
             DlDcchMessageType::C1(C1_2::DlInformationTransfer(DlInformationTransfer {
                 critical_extensions:
@@ -108,9 +129,27 @@ impl<'a> MockUeF1ap<'a> {
         let transport = UeF1apMode {
             du,
             du_ue_context: du.new_ue_context(ue_id, cu_ip_addr).await?,
+            nas: None,
         };
         Ok(MockUeF1ap {
             base: MockUe::new(imsi, ue_id, transport, logger),
+        })
+    }
+
+    pub async fn new_from_base(
+        data: MockUe5GCData,
+        ue_id: u32,
+        du: &'a MockDu,
+        amf_ip_addr: &IpAddr,
+        logger: &Logger,
+    ) -> Result<Self> {
+        let transport = UeF1apMode {
+            du,
+            du_ue_context: du.new_ue_context(ue_id, amf_ip_addr).await?,
+            nas: None,
+        };
+        Ok(MockUeF1ap {
+            base: MockUe::new_from_base(data, ue_id, transport, logger),
         })
     }
 
@@ -128,10 +167,11 @@ impl<'a> MockUeF1ap<'a> {
         ue.handle_rrc_security_mode().await?;
         ue.handle_capability_enquiry().await?;
         ue.handle_nas_registration_accept().await?;
-        ue.receive_nas_configuration_update().await?;
+        ue.handle_nas_configuration_update().await?;
         ue.send_nas_pdu_session_establishment_request().await?;
         du.handle_f1_ue_context_setup(ue.du_ue_context()).await?;
-        ue.handle_rrc_reconfiguration_with_session_accept().await?;
+        ue.handle_rrc_reconfiguration_with_added_session().await?;
+        ue.receive_nas_session_accept().await?;
         Ok(ue)
     }
 
@@ -140,6 +180,19 @@ impl<'a> MockUeF1ap<'a> {
     }
 
     pub async fn perform_rrc_setup(&mut self) -> Result<()> {
+        let registration_request = self.build_register_request()?;
+        info!(&self.logger, "Nas RegistrationRequest >>");
+        self.perform_rrc_setup_common(registration_request, false)
+            .await
+    }
+
+    pub async fn perform_rrc_setup_with_service_request(&mut self) -> Result<()> {
+        let service_request = self.base.build_service_request()?;
+        info!(&self.logger, "Nas ServiceRequest >>");
+        self.perform_rrc_setup_common(service_request, true).await
+    }
+
+    async fn perform_rrc_setup_common(&mut self, nas: Vec<u8>, include_stmsi: bool) -> Result<()> {
         let rrc_setup_request = build_rrc::setup_request();
         info!(self.logger, "Rrc SetupRequest >>");
         self.transport
@@ -150,12 +203,9 @@ impl<'a> MockUeF1ap<'a> {
             bail!("Unexpected RRC message {:?}", message)
         };
         info!(&self.logger, "Rrc Setup <<");
-
-        // This currently assumes that the UE wants to register.
-        let registration_request = self.build_register_request()?;
-        info!(&self.logger, "Nas RegistrationRequest >>");
+        let guti = if include_stmsi { self.data.guti } else { None };
         let rrc_setup_complete =
-            build_rrc::setup_complete(rrc_setup.rrc_transaction_identifier, registration_request);
+            build_rrc::setup_complete(rrc_setup.rrc_transaction_identifier, nas, &guti);
         info!(&self.logger, "Rrc SetupComplete >>");
         self.transport.send_ul_rrc(&rrc_setup_complete).await
     }
@@ -167,6 +217,7 @@ impl<'a> MockUeF1ap<'a> {
             bail!("Expected security mode command - got {:?}", message)
         };
         info!(&self.logger, "Rrc SecurityModeCommand <<");
+
         let security_mode_complete = Box::new(build_rrc::security_mode_complete(
             security_mode_command.rrc_transaction_identifier,
         ));
@@ -187,21 +238,19 @@ impl<'a> MockUeF1ap<'a> {
         self.transport.send_ul_rrc(&information).await
     }
 
-    pub async fn handle_rrc_reconfiguration_with_session_accept(&mut self) -> Result<()> {
-        let nas = self.handle_rrc_reconfiguration(Some(1), None).await?;
-        self.handle_session_accept(nas)
+    pub async fn handle_rrc_reconfiguration_with_added_session(&mut self) -> Result<()> {
+        self.handle_rrc_reconfiguration(Some(1), None).await
     }
 
-    pub async fn handle_rrc_reconfiguration_with_session_release(&mut self) -> Result<()> {
-        let nas = self.handle_rrc_reconfiguration(None, Some(1)).await?;
-        self.handle_session_release(nas).await
+    pub async fn handle_rrc_reconfiguration_with_released_session(&mut self) -> Result<()> {
+        self.handle_rrc_reconfiguration(None, Some(1)).await
     }
 
-    pub async fn handle_rrc_reconfiguration(
+    async fn handle_rrc_reconfiguration(
         &mut self,
         added_drb_id: Option<u8>,
         released_drb_id: Option<u8>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<()> {
         let rrc = self.transport.receive_rrc_dl_dcch().await?;
         let DlDcchMessageType::C1(C1_2::RrcReconfiguration(RrcReconfiguration {
             critical_extensions:
@@ -246,6 +295,8 @@ impl<'a> MockUeF1ap<'a> {
             .send_ul_rrc(&rrc_reconfiguration_complete)
             .await?;
 
-        Ok(nas)
+        self.base.transport.nas = Some(nas);
+
+        Ok(())
     }
 }

@@ -1,11 +1,10 @@
+use crate::data::UeContext5GC;
 use crate::f1ap::{F1AP_BIND_PORT, F1AP_SCTP_PPID};
 use crate::nas::Tmsi;
 use crate::ngap::{NGAP_BIND_PORT, NGAP_SCTP_PPID};
 use crate::procedures::{F1apHandler, NgapHandler, UeMessage, UeMessageHandler};
 use crate::userplane::PacketProcessor;
-use crate::{
-    Config, HandlerApi, NasContext, Sqn, SubscriberAuthParams, SubscriberDb, UserplaneSession,
-};
+use crate::{Config, HandlerApi, Sqn, SubscriberAuthParams, SubscriberDb, UserplaneSession};
 use anyhow::{Result, anyhow, bail};
 use async_std::{
     channel::{self, Sender},
@@ -38,13 +37,13 @@ pub struct QCore {
     packet_processor: PacketProcessor,
     ue_tasks: Arc<Mutex<HashMap<u32, Sender<UeMessage>>>>,
     sub_db: Arc<Mutex<SubscriberDb>>,
-    tmsis: Arc<Mutex<HashMap<Tmsi, NasContextLocator>>>,
+    tmsis: Arc<Mutex<HashMap<[u8; 4], CoreContextLocator>>>,
     served_cells: ServedCellsStore,
     ngap_mode: bool,
 }
 
-enum NasContextLocator {
-    Stored(NasContext),
+enum CoreContextLocator {
+    Stored(UeContext5GC),
     OwnedByUeTask(u32),
 }
 
@@ -191,18 +190,18 @@ impl QCore {
     async fn put_tmsi(
         &self,
         tmsi: Tmsi,
-        v: NasContextLocator,
+        v: CoreContextLocator,
         op: &str,
         ue_id: u32,
         logger: &Logger,
     ) {
-        let old = self.tmsis.lock().await.insert(tmsi.clone(), v);
+        let old = self.tmsis.lock().await.insert(tmsi.0, v);
 
         match old {
-            Some(NasContextLocator::Stored(_)) => {
+            Some(CoreContextLocator::Stored(_)) => {
                 warn!(logger, "Duplicate {tmsi} {op} (stored)");
             }
-            Some(NasContextLocator::OwnedByUeTask(old_ue_id)) if old_ue_id != ue_id => {
+            Some(CoreContextLocator::OwnedByUeTask(old_ue_id)) if old_ue_id != ue_id => {
                 warn!(logger, "Duplicate {tmsi} {op} - (owned by {old_ue_id})");
             }
             _ => {}
@@ -250,12 +249,12 @@ impl HandlerApi for QCore {
             .map(|entry| entry.sqn = sqn)
     }
 
-    async fn take_nas_context(&self, tmsi: &Tmsi) -> Option<NasContext> {
+    async fn take_core_context(&self, tmsi: &[u8]) -> Option<UeContext5GC> {
         let entry = self.tmsis.lock().await.remove(tmsi)?;
 
         match entry {
-            NasContextLocator::Stored(c) => Some(c),
-            NasContextLocator::OwnedByUeTask(ue_id) => {
+            CoreContextLocator::Stored(c) => Some(c),
+            CoreContextLocator::OwnedByUeTask(ue_id) => {
                 let (sender, receiver) = channel::bounded(1);
                 if self
                     .dispatch_ue_message(ue_id, UeMessage::TakeContext(sender))
@@ -270,22 +269,22 @@ impl HandlerApi for QCore {
         }
     }
 
-    async fn put_nas_context(
+    async fn put_core_context(
         &self,
         tmsi: Tmsi,
         ue_id: u32,
-        c: NasContext,
+        c: UeContext5GC,
         _ttl_secs: u32,
         logger: &Logger,
     ) {
-        self.put_tmsi(tmsi, NasContextLocator::Stored(c), "put", ue_id, logger)
+        self.put_tmsi(tmsi, CoreContextLocator::Stored(c), "put", ue_id, logger)
             .await
     }
 
     async fn register_new_tmsi(&self, tmsi: Tmsi, ue_id: u32, logger: &Logger) {
         self.put_tmsi(
             tmsi,
-            NasContextLocator::OwnedByUeTask(ue_id),
+            CoreContextLocator::OwnedByUeTask(ue_id),
             "register",
             ue_id,
             logger,
@@ -319,8 +318,13 @@ impl HandlerApi for QCore {
         self.ue_tasks.lock().await.remove(&ue_id);
     }
 
-    async fn delete_ue_channels(&self) {
-        self.ue_tasks.lock().await.clear();
+    async fn disconnect_ues(&self) {
+        let task_ids: Vec<u32> = self.ue_tasks.lock().await.iter().map(|x| *x.0).collect();
+        for task_id in task_ids {
+            let _ = self
+                .dispatch_ue_message(task_id, UeMessage::Disconnect)
+                .await;
+        }
     }
 
     async fn xxap_request<P: Procedure>(
@@ -355,6 +359,12 @@ impl HandlerApi for QCore {
     async fn delete_userplane_session(&self, session: &UserplaneSession, logger: &Logger) {
         self.packet_processor
             .delete_userplane_session(session, logger)
+            .await
+    }
+
+    async fn deactivate_userplane_session(&self, session: &UserplaneSession, logger: &Logger) {
+        self.packet_processor
+            .deactivate_userplane_session(session, logger)
             .await
     }
 }

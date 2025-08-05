@@ -2,7 +2,7 @@ use qcore_tests::{MockUeF1ap, framework::*};
 
 #[async_std::test]
 async fn session_release() -> anyhow::Result<()> {
-    let (mut du, qc, _dn, sims, logger) = init().await?;
+    let (mut du, qc, _dn, sims, logger) = init_f1ap().await?;
 
     // This test carries out the attach flow - see docs/attach.md.
 
@@ -17,7 +17,9 @@ async fn session_release() -> anyhow::Result<()> {
     ue.send_nas_pdu_session_release_request().await?;
     du.handle_ue_context_modification(ue.du_ue_context())
         .await?;
-    ue.handle_rrc_reconfiguration_with_session_release().await?;
+    ue.handle_rrc_reconfiguration_with_released_session()
+        .await?;
+    ue.handle_nas_session_release().await?;
 
     qc.wait_until_idle().await;
     Ok(())

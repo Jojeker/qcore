@@ -1,5 +1,4 @@
 use super::prelude::*;
-use crate::data::PduSession;
 use f1ap::{
     CellGroupConfig, DlUpTnlInformationToBeSetupItem, DuToCuRrcInformation, UeContextSetupResponse,
     UpTransportLayerInformation,
@@ -8,10 +7,10 @@ use xxap::GtpTunnel;
 
 define_ue_procedure!(UeContextSetupProcedure);
 impl<'a, A: HandlerApi> UeContextSetupProcedure<'a, A> {
-    pub async fn run(
-        self,
-        session: &mut PduSession,
-    ) -> Result<(UeProcedure<'a, A>, CellGroupConfig)> {
+    pub async fn run(mut self) -> Result<(UeProcedure<'a, A>, CellGroupConfig)> {
+        // TODO - support >1 session
+        let session_idx = 0usize;
+        let session = &self.ue.core.pdu_sessions[session_idx];
         let ue_context_setup_request = crate::f1ap::build::ue_context_setup_request(
             self.ue,
             self.config().ip_addr.into(),
@@ -22,8 +21,13 @@ impl<'a, A: HandlerApi> UeContextSetupProcedure<'a, A> {
             .xxap_request::<f1ap::UeContextSetupProcedure>(ue_context_setup_request, self.logger)
             .await?;
         self.log_message(">> F1ap UeContextSetupResponse");
+
+        // TODO: commonize setting of remote tunnel info and error handling in Ngap PduSessionResourceSetupResponse,
+        // Ngap InitialContextSetupResponse and F1ap UeContextSetupResponse
         let (cell_group_config, gtp_tunnel) = self.check_ue_context_setup_response(rsp)?;
-        session.userplane_info.remote_tunnel_info = Some(gtp_tunnel);
+        self.ue.core.pdu_sessions[session_idx]
+            .userplane_info
+            .remote_tunnel_info = Some(gtp_tunnel);
         Ok((self.0, cell_group_config))
     }
 

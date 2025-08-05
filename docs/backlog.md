@@ -1,28 +1,32 @@
 # Backlog
 
 ## In progress
+- Tidying + Refactoring
+  - Split ue_procedure.rs
+  - Split procedures into those acting on UeContext5GC and UeContextRan?  e.g. CoreUeProcedure, RanUeProcedure?
+  - clean up registration procedure code
+  - commonize service and registration session handling 
+  - move ran_session_setup out of ue_procedure.rs
+  - switch "if ngap_mode" etc to use Strategy pattern?
+  - revisit NasBase etc
+  - Sort out UeProcedures
+        let session = &mut self.ue.core.pdu_sessions[0];
+        debug!(self.logger, "{}", session.id);
+  - test scripts - move to builder pattern (new_with_base() etc)?
+
+- OAI test broken - simulated UE doesn't send Configuration Update Complete
+
+- Live testing with multiple phones, update readme documenting interop status.
+
+- Sessions / IP addresses should not persist forever.  Timeout; flush on TMSI register/service request without session reactivation; flush on IMSI registration? 
 - Rejection of Registration Request from Security Mode Command if slice asked for is eMBB / SST 1 with "no network slices available"
   -  causes OnePlus phone to reregister with MIoT SST 3 / SD 0.
 -  Unhandled RrcReestablishmentRequest
--  See f1ap-samsung.log.
-
-- NGAP mode 
-  - move ran_session_setup_phase1 + 2 out of ue_procedure.rs
-  - if initial context setup request fails, 'unhandled message' and we don't save off the GUTI
-  - Registration accept should piggyback on NGAP Initial Context Setup request
-  - use different forwarding tables for NGAP vs F1AP 
-  - DlDropUnknownUe incrementing when no phones attached
-- Session establishment with real phone
-   -  OnePlus 
-      -  refuses to set up a session and sends a ServiceRequest
-   -  OPPO 
-      -  SQN resync not working - fixed??
-      -  Identity Request not working - registration reject?
-   -  Samsung (working)
-   -  Motorola (working)
+- use different forwarding tables for NGAP vs F1AP 
 - "NG setup with GNB name" - log line - trace of bitvec global gnb ID is ugly 
 - PDU session release command should flow on SRB 2, not SRB 1  
- 
+
+
 ## Performance
 - iperf framework
 - Release build perf profiling + tuning

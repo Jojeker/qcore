@@ -2,7 +2,7 @@ use qcore_tests::{MockUeF1ap, framework::*};
 
 #[async_std::test]
 async fn ims_session_establishment() -> anyhow::Result<()> {
-    let (mut du, qc, _dn, sims, logger) = init().await?;
+    let (mut du, qc, _dn, sims, logger) = init_f1ap().await?;
 
     // DU connects to CU
     du.perform_f1_setup(qc.ip_addr()).await?;
@@ -15,7 +15,7 @@ async fn ims_session_establishment() -> anyhow::Result<()> {
     ue.handle_rrc_security_mode().await?;
     ue.handle_capability_enquiry().await?;
     ue.handle_nas_registration_accept().await?;
-    ue.receive_nas_configuration_update().await?;
+    ue.handle_nas_configuration_update().await?;
 
     // UE establishes PDU session with DNN = 'ims' and gets 5GMM status.
     ue.use_dnn(b"ims");

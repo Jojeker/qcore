@@ -2,7 +2,7 @@ use qcore_tests::{MockUeF1ap, SYNCH_FAILURE, framework::*};
 
 #[async_std::test]
 async fn synchronization_failure_recovery() -> anyhow::Result<()> {
-    let (mut du, qc, _dn, sims, logger) = init().await?;
+    let (mut du, qc, _dn, sims, logger) = init_f1ap().await?;
 
     // This is a test of synchronization failure recovery from TS33.501, 6.1.3.3.
     // Synchronization failure occurs when the UE and QCore disagree about the SQN parameters used
@@ -22,7 +22,7 @@ async fn synchronization_failure_recovery() -> anyhow::Result<()> {
     ue.handle_rrc_security_mode().await?;
     ue.handle_capability_enquiry().await?;
     ue.handle_nas_registration_accept().await?;
-    ue.receive_nas_configuration_update().await?;
+    ue.handle_nas_configuration_update().await?;
 
     // And if the UE reregisters during the lifetime of QCore, it gets the SQN right this time, and there
     // is no need for another synchronization.

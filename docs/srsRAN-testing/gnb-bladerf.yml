@@ -9,7 +9,7 @@ cu_cp:
     supported_tracking_areas:
       - tac: 1
         plmn_list:
-          - plmn: "00101"
+          - plmn: "00106"
             tai_slice_support_list:
               - sst: 1
   inactivity_timer: 7200            # Sets the UE/PDU Session/DRB inactivity timer to 7200 seconds. Supported: [1 - 7200].
@@ -18,16 +18,16 @@ ru_sdr:
  device_driver: bladerf
  clock: internal
  srate: 23.04 
- lo_offset: 0
  tx_gain: 66
  rx_gain: 30
+ otw_format: sc16
 
 cell_cfg:
- dl_arfcn: 640000
+ dl_arfcn: 632628
  band: 78
  channel_bandwidth_MHz: 20
  common_scs: 30
- plmn: "00101"
+ plmn: "00106"
  tac: 1
  slicing:
  - sst: 1

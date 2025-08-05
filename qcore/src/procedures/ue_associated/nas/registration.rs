@@ -9,14 +9,12 @@ use oxirush_nas::messages::{
     Nas5gsSecurityHeader, NasAuthenticationFailure, NasAuthenticationResponse,
     NasRegistrationRequest, NasSecurityModeComplete,
 };
-use oxirush_nas::{
-    Nas5gsSecurityHeaderType, NasMessageContainer, NasUeSecurityCapability, decode_nas_5gs_message,
-};
+use oxirush_nas::{NasMessageContainer, NasUeSecurityCapability, decode_nas_5gs_message};
 use security::{Challenge, resync_sqn};
 
 enum RegistrationType {
     Supi(Imsi),
-    Guti(AmfIds, Tmsi),
+    Guti,
 }
 
 #[derive(Debug)]
@@ -26,75 +24,96 @@ enum NasAuthOutcome {
     ResyncSqn([u8; 6]),
 }
 
+// Called before the procedure starts to extract a GUTI mobile identity.
+pub fn peek_mobile_identity(r: &Nas5gsMessage) -> Result<MobileIdentity> {
+    match r {
+        Nas5gsMessage::Gmm(_header, Nas5gmmMessage::RegistrationRequest(registration_request)) => {
+            crate::nas::parse::fgs_mobile_identity(&registration_request.fgs_mobile_identity)
+        }
+        _ => bail!("Not a registration request"),
+    }
+}
+
 define_ue_procedure!(RegistrationProcedure);
 
 impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
     pub async fn run(
         mut self,
-        r: Box<NasRegistrationRequest>,
-        security_header: Option<Nas5gsSecurityHeader>,
+        registration_request: Box<NasRegistrationRequest>,
+        _security_header: Option<Nas5gsSecurityHeader>,
     ) -> Result<()> {
         self.log_message(">> Nas RegistrationRequest");
-        match self.handle_registration(r, security_header).await {
-            Ok(()) => {
-                // Derive Kgnb, and from that kRRCInt.
 
-                /* TS33.501, 6.8.1.1.2.3: "The NAS (uplink and downlink) COUNTs are set to start
-                   values, and the start value of the uplink NAS COUNT shall be used as freshness 
-                   parameter in the KgNB derivation from the fresh KAMF (after primary authentication) 
-                   when UE receives AS SMC the KgNB is derived from the current 5G NAS security context, 
-                   i.e., the fresh KAMF is used to derive the KgNB." */
+        // If this is a registration update and security is not activated then we failed to retrieve the UE context
+        // based on the TMSI in the outer message.  Tell the UE it needs to do an initial registration.
+        let is_registration_update = registration_request.fgs_registration_type.value
+            & REGISTRATION_TYPE_MASK
+            != REGISTRATION_TYPE_INITIAL;
 
-                /* 6.8.1.1.2.2: When the UE receives the AS SMC without having received a NAS Security Mode Command after the Registration Request
-                with "PDU session(s) to be re-activated", it shall use the uplink NAS COUNT of the Registration Request message that
-                triggered the AS SMC to be sent as freshness parameter in the derivation of the initial KgNB/KeNB.           */
-                debug!(self.logger, "UL NAS COUNT {}", self.ue.nas.ul_nas_count());
-                let kgnb = security::derive_kgnb(&self.ue.kamf, self.ue.nas.ul_nas_count());
-                self.0 = self.0.ran_ue_registration(&kgnb).await?;
-                self.accept_registration().await?;
-                self.send_configuration_update().await?;
-            }
+        if is_registration_update && !self.ue.core.nas.security_activated() {
+            warn!(
+                self.logger,
+                "Reject security protected registration update with unknown or missing TMSI in outer message"
+            );
+            // TS24.501 5.5.1.3.5
+            // "The UE shall enter the state 5GMM-DEREGISTERED.NORMAL-SERVICE. The UE shall delete any mapped 5G NAS
+            // security context or partial native 5G NAS security context."
+            self.reject_registration(FGMM_CAUSE_IMPLICITLY_DEREGISTERED)
+                .await?;
+            return Ok(());
+        }
+
+        // The UE is authenticated based on cleartext IEs in the outer message.  Any non-cleartext IEs (such as those
+        // governing session reactivation) come in a NAS message container (TS24.501, 4.4.6).
+        //   -  On a initial GUTI registration that reusing existing security context, the NAS message container IE is in the Registration Request
+        //   -  Otherwise, it comes in the Security Mode Complete.
+        //
+        let registration_request = match self.handle_registration(registration_request).await {
+            Ok(r) => r,
             Err(cause) => {
                 if cause != ABORT_PROCEDURE {
-                    self.reject_registration(cause).await?
+                    self.reject_registration(cause).await?;
+                    return Ok(());
                 } else {
                     bail!("Abort registration procedure")
                 }
             }
-        }
+        };
+        // From now on, we are using the full version of the registration request complete with non-cleartext IEs, if available.
 
-        Ok(())
-    }
+        let (current_sessions, reactivation_result) = self
+            .reconcile_sessions(
+                &registration_request.uplink_data_status,
+                &registration_request.pdu_session_status,
+            )
+            .await?;
 
-    async fn accept_registration(&mut self) -> Result<()> {
-        let tmsi = Tmsi(rand::random()); // TODO: 0xffffffff is not a valid TMSI (TS23.003, 2.4))
-        debug!(self.logger, "Assigned {}", tmsi);
+        let guti = self.allocate_tmsi().await;
         debug!(
             self.logger,
             "Allowed NSSAIs: SST {} with and without SD 0",
             self.config().sst
         );
-        let r = crate::nas::build::registration_accept(
+
+        let accept = crate::nas::build::registration_accept(
             self.config().sst,
+            guti,
             &self.config().plmn,
-            &self.config().amf_ids,
-            &tmsi.0,
-            &self.ue.tac,
+            &self.ue.core.tac,
+            registration_request
+                .uplink_data_status
+                .map(|_| reactivation_result),
+            current_sessions,
         );
-        // TODO: should register_new_tmsi be called allocate_tmsi() and return the TMSI?
-        self.api
-            .register_new_tmsi(tmsi.clone(), self.ue.key, self.logger)
-            .await;
-        self.ue.tmsi = Some(tmsi);
         self.log_message("<< Nas RegistrationAccept");
-        let _rsp = self
-            .nas_request(
-                r,
-                nas_filter!(RegistrationComplete),
-                "Registration complete",
-            )
+        self.0 = self.0.ran_context_create(accept).await?;
+
+        let _registration_complete = self
+            .receive_nas(nas_filter!(RegistrationComplete), "Registration Complete")
             .await?;
-        self.log_message(">> Nas RegistrationComplete");
+
+        self.perform_configuration_update().await?;
+
         Ok(())
     }
 
@@ -104,29 +123,59 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
         self.nas_indication(reject).await
     }
 
+    // Takes as input the cleartext only registration request, and returns the full registration request
     async fn handle_registration(
         &mut self,
         registration_request: Box<NasRegistrationRequest>,
-        security_header: Option<Nas5gsSecurityHeader>,
-    ) -> Result<(), u8> {
-        match self.check_registration_request(registration_request)? {
-            (RegistrationType::Supi(Imsi(imsi)), ue_security_capability) => {
-                self.supi_registration(&imsi, ue_security_capability).await
-            }
-            (RegistrationType::Guti(amf_ids, tmsi), ue_security_capability) => {
-                let identity_procedure_needed = self
-                    .guti_registration(&amf_ids, &tmsi, security_header)
-                    .await?;
-
-                if identity_procedure_needed {
-                    self.ue.reset_nas_security();
-                    let imsi = self.query_ue_identity().await?;
+    ) -> Result<Box<NasRegistrationRequest>, u8> {
+        let nas_message_container = {
+            match self.check_registration_request(&registration_request)? {
+                (RegistrationType::Supi(Imsi(imsi)), ue_security_capability) => {
                     self.supi_registration(&imsi, ue_security_capability)
-                        .await?;
+                        .await?
                 }
 
-                Ok(())
+                (RegistrationType::Guti, ue_security_capability) => {
+                    // If we successfully retrieved the UE earlier, we can continue.
+                    // Otherwise this was an unknown GUTI, so we need to perform an identity procedure.
+                    // We can tell based on whether there is a NAS security context in place.
+                    if self.ue.core.nas.security_activated() {
+                        // If there are any non-cleartext IEs to process, there will be an inner registration request
+                        // in the NAS message container.  Switch to that, if it is present, otherwise return the original
+                        // request.
+                        match registration_request.nas_message_container {
+                            None => return Ok(registration_request),
+                            Some(x) => x,
+                        }
+                    } else {
+                        self.ue.reset_nas_security();
+                        let imsi = self.query_ue_identity().await?;
+                        self.supi_registration(&imsi, ue_security_capability)
+                            .await?
+                    }
+                }
             }
+        };
+
+        // Decode (but do not admit) the registration request in the NAS message container.
+        let value = nas_message_container.value;
+        let nas = Box::new(decode_nas_5gs_message(&value).map_err(|e| {
+            warn!(
+                self.logger,
+                "NAS decode error - {e} - message bytes: {:?}", value
+            );
+            ABORT_PROCEDURE
+        })?);
+        if let Nas5gsMessage::Gmm(_, Nas5gmmMessage::RegistrationRequest(registration_request)) =
+            *nas
+        {
+            Ok(Box::new(registration_request))
+        } else {
+            warn!(
+                self.logger,
+                "Nas message container contained non-registration Nas message {:?}", nas
+            );
+            Err(ABORT_PROCEDURE)
         }
     }
 
@@ -151,7 +200,7 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
         &mut self,
         imsi: &str,
         ue_security_capability: NasUeSecurityCapability,
-    ) -> Result<(), u8> {
+    ) -> Result<NasMessageContainer, u8> {
         info!(self.logger, "SUPI registration for imsi-{imsi}");
 
         self.authenticate_ue(imsi).await?;
@@ -159,7 +208,7 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
         self.activate_nas_security(ue_security_capability)
             .await
             .map_err(|e| {
-                warn!(self.logger, "NAS security failure - {e}");
+                warn!(self.logger, "Failure during NAS security activation - {e}");
                 ABORT_PROCEDURE
             })
     }
@@ -170,7 +219,7 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
         loop {
             match self.perform_nas_authentication(imsi).await? {
                 NasAuthOutcome::Kseaf(kseaf) => {
-                    self.ue.kamf = security::derive_kamf(&kseaf, imsi.as_bytes());
+                    self.ue.core.kamf = security::derive_kamf(&kseaf, imsi.as_bytes());
                     return Ok(());
                 }
                 NasAuthOutcome::RetryWithNewKSI if !ksi_retry_done => {
@@ -197,10 +246,11 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
     async fn activate_nas_security(
         &mut self,
         ue_security_capabilities: NasUeSecurityCapability,
-    ) -> Result<()> {
+    ) -> Result<NasMessageContainer> {
         self.configure_nas_security(&ue_security_capabilities);
-        let r = crate::nas::build::security_mode_command(ue_security_capabilities, *self.ue.ksi);
-        self.log_message("<< NascSecurityModeCommand");
+        let r =
+            crate::nas::build::security_mode_command(ue_security_capabilities, *self.ue.core.ksi);
+        self.log_message("<< NasSecurityModeCommand");
         let Ok(security_mode_complete) = self
             .nas_request(
                 r,
@@ -223,7 +273,7 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
         let req = crate::nas::build::authentication_request(
             &challenge.rand,
             &challenge.autn,
-            *self.ue.ksi,
+            *self.ue.core.ksi,
         );
 
         self.log_message("<< NasAuthenticationRequest");
@@ -310,96 +360,12 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
             .ok_or_else(|| anyhow!("Invalid AUTS signature on NAS authentication synch failure"))
     }
 
-    // Ok(true) if identity request is needed, Ok(false) if no action is needed, and
-    // Err(cause code) if we should reject the registration
-    async fn guti_registration(
-        &mut self,
-        amf_ids: &AmfIds,
-        tmsi: &Tmsi,
-        security_header: Option<Nas5gsSecurityHeader>,
-    ) -> Result<bool, u8> {
-        info!(self.logger, "GUTI registration for {tmsi}");
-
-        // We have already checked the PLMN, so we just need to check the AMF IDs
-        // at this stage.
-        let guami_matches = amf_ids == &self.config().amf_ids;
-        if !guami_matches {
-            warn!(
-                self.logger,
-                "Wrong AMF IDs in GUTI - theirs {} ours {}",
-                amf_ids,
-                self.config().amf_ids
-            );
-        }
-
-        // Deal with the case of a reregistration within a previously secured RRC channel.
-        if let Some(existing_tmsi) = &self.ue.tmsi {
-            info!(
-                self.logger,
-                "UE reregistration when security context is already in place"
-            );
-            if !self.ue.nas.security_activated() {
-                error!(self.logger, "Logic error - no security context exists");
-                return Err(FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED);
-            }
-            if existing_tmsi == tmsi && guami_matches {
-                // No need to activate either NAS or RRC security - just accept
-                // TODO - refresh UE registration TTL
-                return Ok(false);
-            } else {
-                warn!(self.logger, "UE not using GUTI it was given");
-                return Err(FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED);
-            }
-        }
-
-        // This leaves us in the mainline case of a GUTI registration on a new RRC channel,
-        // where the UE is trying to reinstate its previous NAS security context.
-        // In this case, the UE is meant to integrity protect its message.
-        let security_type = security_header
-            .map(|hdr| hdr.security_header_type)
-            .unwrap_or(Nas5gsSecurityHeaderType::PlainNasMessage);
-
-        if security_type != Nas5gsSecurityHeaderType::IntegrityProtected {
-            warn!(
-                self.logger,
-                "GUTI registration with wrong security protection {:?}", security_type
-            );
-            return Err(FGMM_CAUSE_SEMANTICALLY_INCORRECT_MESSAGE);
-        }
-
-        // Integrity protected GUTI registration
-        if guami_matches && self.restore_existing_nas_security_context(tmsi).await {
-            // Successful GUTI registration.  We can accept the registration.
-            return Ok(false);
-        }
-
-        // Identity procedure needed
-        debug!(
-            self.logger,
-            "GUTI with unknown AMF IDs or TMSI - trigger Identity Request"
-        );
-
-        Ok(true)
-    }
-
-    async fn restore_existing_nas_security_context(&mut self, tmsi: &Tmsi) -> bool {
-        match self.take_nas_context(tmsi).await {
-            Some(c) => {
-                self.ue.nas = c;
-                true
-            }
-            None => {
-                debug!(self.logger, "Unknown TMSI");
-                false
-            }
-        }
-    }
-
     fn check_registration_request(
         &self,
-        registration_request: Box<NasRegistrationRequest>,
+        registration_request: &NasRegistrationRequest,
     ) -> Result<(RegistrationType, NasUeSecurityCapability), u8> {
-        let Some(ue_security_capability) = registration_request.ue_security_capability else {
+        let Some(ue_security_capability) = registration_request.ue_security_capability.clone()
+        else {
             warn!(
                 self.logger,
                 "UE security capability missing from Registration Request"
@@ -413,15 +379,18 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
                     warn!(self.logger, "{e}");
                     FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED
                 })? {
-                MobileIdentity::Guti(plmn, amf_ids, tmsi) => (
-                    plmn,
-                    (
-                        RegistrationType::Guti(amf_ids, tmsi),
-                        ue_security_capability,
-                    ),
-                ),
+                MobileIdentity::Guti(Guti(plmn, _amf_ids, _tmsi)) => {
+                    (plmn, (RegistrationType::Guti, ue_security_capability))
+                }
                 MobileIdentity::Supi(plmn, imsi) => {
                     (plmn, (RegistrationType::Supi(imsi), ue_security_capability))
+                }
+                x => {
+                    warn!(
+                        self.logger,
+                        "Expected Guti or Supi identity on a registration request, got {x:?}",
+                    );
+                    return Err(FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED);
                 }
             };
 
@@ -452,7 +421,7 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
         debug!(self.logger, "SQN for challenge: {:02x?}", auth_params.sqn);
 
         // Generate a new KSI for each challenge.
-        self.ue.ksi.inc();
+        self.ue.core.ksi.inc();
 
         let challenge = security::generate_challenge(
             &auth_params.sim_creds.ki,
@@ -499,60 +468,46 @@ impl<'a, A: HandlerApi> RegistrationProcedure<'a, A> {
     fn check_nas_security_mode_complete(
         &mut self,
         security_mode_complete: Box<NasSecurityModeComplete>,
-    ) -> Result<()> {
+    ) -> Result<NasMessageContainer> {
         match *security_mode_complete {
             NasSecurityModeComplete {
                 imeisv: _imeisv,
-                nas_message_container: Some(NasMessageContainer { value, .. }),
+                nas_message_container: Some(nas_message_container),
                 non_imeisv_pei: _non_imeisv_pei,
-            } => {
-                // TS24.501, 4.4.6 "After activating a 5G NAS security context resulting from a security
-                // mode control procedure... the UE shall include the entire REGISTRATION REQUEST ... in the ...
-                // NAS message container IE in the SECURITY MODE COMPLETE message."
-                // We must decode this message without using the security context - hence the direct call to
-                // decode_nas_5gs_message() instead of self.nas_decode().
-                let nas =
-                    Box::new(decode_nas_5gs_message(&value).map_err(|e| {
-                        anyhow!("NAS decode error - {e} - message bytes: {:?}", value)
-                    })?);
-                if let Nas5gsMessage::Gmm(
-                    _,
-                    Nas5gmmMessage::RegistrationRequest(_registration_request),
-                ) = *nas
-                {
-                    // TODO: do something with the registration request
-                } else {
-                    bail!(
-                        "Security mode complete contained non-registration nas message {:?}",
-                        nas
-                    )
-                };
-            }
+            } => Ok(nas_message_container),
             _ => {
-                warn!(
-                    self.logger,
-                    "Registration request missing from {:?}", security_mode_complete
+                bail!(
+                    "Nas Message container missing from {:?}",
+                    security_mode_complete
                 );
             }
         }
-
-        // TODO - do something with retransmitted registration request
-        Ok(())
     }
 
     fn configure_nas_security(&mut self, ue_security_capabilities: &NasUeSecurityCapability) {
-        self.ue.security_capabilities =
+        self.ue.core.security_capabilities =
             crate::nas::parse::nas_ue_security_capability(ue_security_capabilities);
 
         // TS33.501, 6.7.2: AMF starts integrity protection before transmitting SecurityModeCommand.
-        let knasint = security::derive_knasint(&self.ue.kamf);
-        self.ue.nas.enable_security(knasint);
+        let knasint = security::derive_knasint(&self.ue.core.kamf);
+        self.ue.core.nas.enable_security(knasint);
     }
 
-    async fn send_configuration_update(&mut self) -> Result<()> {
-        let command =
-            crate::nas::build::configuration_update_command(&self.config().network_display_name);
+    // TODO: commonize with service.rs
+    async fn perform_configuration_update(&mut self) -> Result<()> {
+        let command = crate::nas::build::configuration_update_command(
+            Some(&self.config().network_display_name),
+            None,
+        );
         self.log_message("<< Nas ConfigurationUpdateCommand");
-        self.nas_indication(command).await
+        let _configuration_update_complete = self
+            .nas_request(
+                command,
+                nas_filter!(ConfigurationUpdateComplete),
+                "Configuration update complete",
+            )
+            .await?;
+        self.log_message(">> Nas ConfigurationUpdateComplete");
+        Ok(())
     }
 }

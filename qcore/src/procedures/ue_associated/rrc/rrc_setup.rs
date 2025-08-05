@@ -1,7 +1,10 @@
 use super::prelude::*;
 use crate::procedures::ue_associated::UplinkNasProcedure;
 use f1ap::SrbId;
-use rrc::{C1_6, CriticalExtensions22, RrcSetupComplete, RrcSetupRequest, UlDcchMessageType};
+use rrc::{
+    C1_6, CriticalExtensions22, Ng5gSTmsi, Ng5gSTmsiValue, RrcSetupComplete, RrcSetupRequest,
+    UlDcchMessageType,
+};
 
 define_ue_procedure!(RrcSetupProcedure);
 
@@ -21,11 +24,23 @@ impl<'a, A: HandlerApi> RrcSetupProcedure<'a, A> {
             ..
         })) = response.message
         else {
-            bail!("Expected Rrc Setup complete, got {:?}", response)
+            bail!("Expected Rrc SetupComplete, got {:?}", response)
+        };
+        self.log_message(">> Rrc SetupComplete");
+
+        let stmsi: Option<Vec<u8>> = if let Some(Ng5gSTmsiValue::Ng5gSTmsi(Ng5gSTmsi(x))) =
+            rrc_setup_complete_ies.ng_5g_s_tmsi_value
+        {
+            Some(x.into())
+        } else {
+            None
         };
 
-        self.log_message(">> Rrc SetupComplete");
-        let nas = self.nas_decode(&rrc_setup_complete_ies.dedicated_nas_message.0)?;
-        UplinkNasProcedure::new(self.0).run(nas).await
+        UplinkNasProcedure::new(self.0)
+            .run_initial(
+                rrc_setup_complete_ies.dedicated_nas_message.0,
+                stmsi.as_deref(),
+            )
+            .await
     }
 }

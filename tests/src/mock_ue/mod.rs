@@ -1,8 +1,11 @@
-use anyhow::{Result, anyhow, bail};
+mod mock_ue_5gc;
+pub use mock_ue_5gc::*;
+
+use anyhow::{Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use oxirush_nas::{
-    Nas5gmmMessage, Nas5gsMessage, Nas5gsmMessage, NasPduAddress, NasPduSessionType,
-    decode_nas_5gs_message,
+    Nas5gmmMessage, Nas5gsMessage, Nas5gsmMessage, NasPduAddress, NasPduSessionReactivationResult,
+    NasPduSessionStatus, NasPduSessionType, decode_nas_5gs_message,
     messages::{
         NasAuthenticationRequest, NasDlNasTransport, NasPduSessionEstablishmentAccept,
         NasPduSessionReleaseCommand,
@@ -33,7 +36,12 @@ pub mod mock_ue_ngap;
 
 #[async_trait]
 pub trait Transport {
-    async fn send_nas(&mut self, nas_bytes: Vec<u8>, logger: &Logger) -> Result<()>;
+    async fn send_nas(
+        &mut self,
+        nas_bytes: Vec<u8>,
+        guti: &Option<[u8; 10]>,
+        logger: &Logger,
+    ) -> Result<()>;
     async fn receive_nas(&mut self, logger: &Logger) -> Result<Vec<u8>>;
     async fn send_userplane_packet(
         &self,
@@ -46,10 +54,7 @@ pub trait Transport {
 }
 
 pub struct MockUe<T: Transport> {
-    imsi: String,
-    guti: Option<[u8; 10]>,
-    pub ipv4_addr: Ipv4Addr,
-    dnn: Option<&'static [u8]>,
+    pub data: MockUe5GCData,
     transport: T,
     logger: Logger,
     use_wrong_imsi: bool,
@@ -58,21 +63,31 @@ pub struct MockUe<T: Transport> {
 impl<T: Transport> MockUe<T> {
     pub fn new(imsi: String, ue_id: u32, transport: T, logger: &Logger) -> Self {
         MockUe {
-            imsi,
-            guti: None,
-            ipv4_addr: Ipv4Addr::UNSPECIFIED,
-            dnn: None,
+            data: MockUe5GCData::new(imsi),
             transport,
             logger: logger.new(o!("ue" => ue_id)),
             use_wrong_imsi: false,
         }
     }
 
+    pub fn new_from_base(data: MockUe5GCData, ue_id: u32, transport: T, logger: &Logger) -> Self {
+        MockUe {
+            data,
+            transport,
+            logger: logger.new(o!("ue" => ue_id)),
+            use_wrong_imsi: false,
+        }
+    }
+
+    pub fn disconnect(self) -> MockUe5GCData {
+        self.data
+    }
+
     pub fn transport(&self) -> &T {
         &self.transport
     }
     pub fn use_guti(&mut self, guti: [u8; 10]) {
-        self.guti = Some(guti);
+        self.data.guti = Some(guti);
     }
 
     // Use the wrong imsi on the next IdentityResponse
@@ -81,18 +96,30 @@ impl<T: Transport> MockUe<T> {
     }
 
     pub fn use_dnn(&mut self, dnn: &'static [u8]) {
-        self.dnn = Some(dnn);
+        self.data.dnn = Some(dnn);
     }
 
     async fn send_nas(&mut self, nas_bytes: Vec<u8>) -> Result<()> {
-        self.transport.send_nas(nas_bytes, &self.logger).await
+        self.transport
+            .send_nas(nas_bytes, &self.data.guti, &self.logger)
+            .await
+    }
+
+    async fn send_nas_no_outer_stmsi(&mut self, nas_bytes: Vec<u8>) -> Result<()> {
+        self.transport
+            .send_nas(nas_bytes, &None, &self.logger)
+            .await
     }
 
     async fn receive_nas(&mut self) -> Result<Box<Nas5gsMessage>> {
-        let nas_bytes = self.transport.receive_nas(&self.logger).await?;
+        let nas = self.transport.receive_nas(&self.logger).await?;
+        self.decode_nas(nas)
+    }
+
+    fn decode_nas(&mut self, nas: Vec<u8>) -> Result<Box<Nas5gsMessage>> {
         let outer = Box::new(
-            decode_nas_5gs_message(&nas_bytes)
-                .map_err(|e| anyhow!("Nas decode error - {e} - message bytes: {:?}", nas_bytes))?,
+            decode_nas_5gs_message(&nas)
+                .map_err(|e| anyhow!("Nas decode error - {e} - message bytes: {:?}", nas))?,
         );
         let (nas, _security_header) = match *outer {
             Nas5gsMessage::Gmm(_, _) => (outer, None),
@@ -103,11 +130,38 @@ impl<T: Transport> MockUe<T> {
         Ok(nas)
     }
 
+    fn build_register_request_for_nas_security_mode(&self) -> Result<Vec<u8>> {
+        let include_session_1 = self.data.ipv4_addr != Ipv4Addr::UNSPECIFIED;
+        assert!(self.data.guti.is_none());
+        build_nas::registration_request(
+            build_nas::mobile_identity_supi(&self.data.imsi),
+            include_session_1,
+        )
+    }
+
     fn build_register_request(&self) -> Result<Vec<u8>> {
-        if let Some(guti) = self.guti {
-            build_nas::registration_request(build_nas::mobile_identity_guti(&guti))
+        let include_session_1 = self.data.ipv4_addr != Ipv4Addr::UNSPECIFIED;
+        if let Some(guti) = self.data.guti {
+            if include_session_1 {
+                build_nas::guti_registration_request_with_inner_session_activation(
+                    build_nas::mobile_identity_guti(&guti),
+                )
+            } else {
+                build_nas::registration_request(build_nas::mobile_identity_guti(&guti), false)
+            }
         } else {
-            build_nas::registration_request(build_nas::mobile_identity_supi(&self.imsi))
+            build_nas::registration_request(
+                build_nas::mobile_identity_supi(&self.data.imsi),
+                include_session_1,
+            )
+        }
+    }
+
+    fn build_service_request(&self) -> Result<Vec<u8>> {
+        if let Some(guti) = self.data.guti {
+            build_nas::service_request(build_nas::mobile_identity_stmsi(&guti))
+        } else {
+            bail!("GUTI missing")
         }
     }
 
@@ -132,7 +186,8 @@ impl<T: Transport> MockUe<T> {
     pub async fn handle_nas_security_mode(&mut self) -> Result<()> {
         ensure_nas!(SecurityModeCommand, self.receive_nas().await?);
         info!(&self.logger, "Nas SecurityModeCommand <<");
-        let nas_security_mode_complete = build_nas::security_mode_complete()?;
+        let register_request = self.build_register_request_for_nas_security_mode()?;
+        let nas_security_mode_complete = build_nas::security_mode_complete(register_request)?;
         info!(&self.logger, "Nas SecurityModeComplete >>");
         self.send_nas(nas_security_mode_complete).await
     }
@@ -144,7 +199,7 @@ impl<T: Transport> MockUe<T> {
             self.use_wrong_imsi = false;
             "543938298342342"
         } else {
-            &self.imsi
+            &self.data.imsi
         };
         let nas_identity_response = build_nas::identity_response(imsi)?;
         info!(&self.logger, "Nas IdentityResponse >>");
@@ -154,6 +209,7 @@ impl<T: Transport> MockUe<T> {
     pub async fn handle_nas_registration_accept(&mut self) -> Result<()> {
         let message = ensure_nas!(RegistrationAccept, self.receive_nas().await?);
         info!(&self.logger, "Nas RegistrationAccept <<");
+
         let Some(guti_ie) = message.fg_guti else {
             bail!("Expected GUTI in registration accept")
         };
@@ -161,29 +217,76 @@ impl<T: Transport> MockUe<T> {
         info!(&self.logger, "UE was assigned GUTI {:02x?}", guti);
         self.use_guti(guti.try_into().unwrap());
 
+        self.check_session_reactivation(
+            &message.pdu_session_reactivation_result,
+            &message.pdu_session_status,
+        )?;
+
         let nas_registration_complete = build_nas::registration_complete()?;
         info!(&self.logger, "Nas RegistrationComplete >>");
         self.send_nas(nas_registration_complete).await
     }
 
-    pub async fn receive_nas_configuration_update(&mut self) -> Result<()> {
-        let _message = ensure_nas!(ConfigurationUpdateCommand, self.receive_nas().await?);
-        info!(&self.logger, "Nas ConfigurationUpdateCommand <<");
+    fn check_session_reactivation(
+        &self,
+        reactivation_result: &Option<NasPduSessionReactivationResult>,
+        session_status: &Option<NasPduSessionStatus>,
+    ) -> Result<()> {
+        if self.data.ipv4_addr != Ipv4Addr::UNSPECIFIED {
+            match reactivation_result {
+                None => bail!("Reactivation result missing"),
+                Some(x) => {
+                    ensure!(
+                        x.value == vec![0, 0],
+                        "Expecting no reactivation result failures"
+                    );
+                }
+            }
+            match session_status {
+                None => bail!("Session status missing"),
+                Some(x) => {
+                    ensure!(
+                        x.value == vec![2, 0],
+                        "Expecting session 1 to be reactivated"
+                    );
+                }
+            }
+        }
         Ok(())
+    }
+
+    pub async fn handle_nas_configuration_update(&mut self) -> Result<()> {
+        let message = ensure_nas!(ConfigurationUpdateCommand, self.receive_nas().await?);
+        info!(&self.logger, "Nas ConfigurationUpdateCommand <<");
+        if let Some(guti_ie) = message.fg_guti {
+            let guti = &guti_ie.value[1..11];
+            info!(&self.logger, "UE was assigned GUTI {:02x?}", guti);
+            self.use_guti(guti.try_into().unwrap());
+        }
+        let configuration_update_complete = build_nas::configuration_update_complete()?;
+        info!(&self.logger, "Nas ConfigurationUpdateComplete >>");
+        self.send_nas(configuration_update_complete).await
     }
 
     pub async fn send_nas_pdu_session_establishment_request(&mut self) -> Result<()> {
         let nas_session_establishment_request =
-            build_nas::pdu_session_establishment_request(self.dnn)?;
+            build_nas::pdu_session_establishment_request(self.data.dnn)?;
         info!(&self.logger, "Nas PduSessionEstablishmentRequest >>");
         self.send_nas(nas_session_establishment_request).await
     }
 
     pub async fn send_nas_deregistration_request(&mut self) -> Result<()> {
         let nas_deregistration_request = build_nas::deregistration_request()?;
-        self.guti = None;
+        self.data.guti = None;
         info!(&self.logger, "Nas DeregistrationRequest >>");
         self.send_nas(nas_deregistration_request).await
+    }
+
+    pub async fn send_nas_service_request(&mut self) -> Result<()> {
+        // Potential fields needed in the InitialUeMessage:
+        // - UEContextRequest
+        let nas_bytes = self.build_service_request()?;
+        self.send_nas(nas_bytes).await
     }
 
     pub async fn send_userplane_packet(
@@ -193,7 +296,7 @@ impl<T: Transport> MockUe<T> {
         dst_port: u16,
     ) -> Result<()> {
         self.transport
-            .send_userplane_packet(&self.ipv4_addr, dst_ip, src_port, dst_port)
+            .send_userplane_packet(&self.data.ipv4_addr, dst_ip, src_port, dst_port)
             .await
     }
 
@@ -219,8 +322,9 @@ impl<T: Transport> MockUe<T> {
         Ok(())
     }
 
-    pub fn handle_session_accept(&mut self, nas_bytes: Vec<u8>) -> Result<()> {
-        let message = decode_security_protected_sm(nas_bytes)?;
+    pub async fn receive_nas_session_accept(&mut self) -> Result<()> {
+        let nas = self.receive_nas().await?;
+        let message = decode_security_protected_sm(nas)?;
         let Nas5gsmMessage::PduSessionEstablishmentAccept(NasPduSessionEstablishmentAccept {
             selected_pdu_session_type: NasPduSessionType { value: 1, .. },
             pdu_address:
@@ -236,7 +340,7 @@ impl<T: Transport> MockUe<T> {
 
         info!(&self.logger, "Nas PduSessionEstablishmentAccept <<");
 
-        self.ipv4_addr = Ipv4Addr::new(
+        self.data.ipv4_addr = Ipv4Addr::new(
             nas_pdu_address_ie[1],
             nas_pdu_address_ie[2],
             nas_pdu_address_ie[3],
@@ -245,14 +349,24 @@ impl<T: Transport> MockUe<T> {
         Ok(())
     }
 
+    pub async fn receive_nas_service_accept(&mut self) -> Result<()> {
+        let message = ensure_nas!(ServiceAccept, self.receive_nas().await?);
+        info!(&self.logger, "Nas ServiceAccept <<");
+        self.check_session_reactivation(
+            &message.pdu_session_reactivation_result,
+            &message.pdu_session_status,
+        )
+    }
+
     pub async fn send_nas_pdu_session_release_request(&mut self) -> Result<()> {
         let nas_session_release_request = build_nas::pdu_session_release_request()?;
         info!(&self.logger, "Nas PduSessionReleaseRequest >>");
         self.send_nas(nas_session_release_request).await
     }
 
-    pub async fn handle_session_release(&mut self, nas_bytes: Vec<u8>) -> Result<()> {
-        let message = decode_security_protected_sm(nas_bytes)?;
+    pub async fn handle_nas_session_release(&mut self) -> Result<()> {
+        let nas = self.receive_nas().await?;
+        let message = decode_security_protected_sm(nas)?;
         let Nas5gsmMessage::PduSessionReleaseCommand(NasPduSessionReleaseCommand { .. }) = message
         else {
             bail!("Expected NasPduSessionReleaseCommand, got {message:?}");
@@ -264,19 +378,15 @@ impl<T: Transport> MockUe<T> {
     }
 }
 
-pub fn decode_security_protected_sm(nas_bytes: Vec<u8>) -> Result<Nas5gsmMessage> {
-    let nas = decode_nas_5gs_message(&nas_bytes)?;
-    let Nas5gsMessage::SecurityProtected(_header, nas_gmm) = nas else {
-        bail!("Expected security protected message, got {nas:?}")
-    };
+pub fn decode_security_protected_sm(nas: Box<Nas5gsMessage>) -> Result<Nas5gsmMessage> {
     let Nas5gsMessage::Gmm(
         _header,
         Nas5gmmMessage::DlNasTransport(NasDlNasTransport {
             payload_container, ..
         }),
-    ) = *nas_gmm
+    ) = *nas
     else {
-        bail!("Expected NasDlNasTransport, got {nas_gmm:?}")
+        bail!("Expected NasDlNasTransport, got {nas:?}")
     };
 
     let nas_gsm = decode_nas_5gs_message(&payload_container.value)?;

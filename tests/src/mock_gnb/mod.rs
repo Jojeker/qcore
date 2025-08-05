@@ -30,6 +30,7 @@ pub struct UeContext {
     amf_ue_ngap_id: Option<AmfUeNgapId>,
     pub binding: Binding,
     pub session: Option<Session>,
+    nas: Option<Vec<u8>>,
 }
 
 pub struct Session {
@@ -80,6 +81,7 @@ impl MockGnb {
                 .new_ue_binding_from_ip(&worker_ip.to_string())
                 .await?,
             session: None,
+            nas: None,
         })
     }
 
@@ -114,10 +116,7 @@ impl MockGnb {
         Ok(())
     }
 
-    pub async fn handle_pdu_session_resource_setup_with_session_accept(
-        &self,
-        ue: &mut UeContext,
-    ) -> Result<Vec<u8>> {
+    pub async fn handle_pdu_session_resource_setup(&self, ue: &mut UeContext) -> Result<()> {
         let pdu = self.receive_pdu().await?;
         let NgapPdu::InitiatingMessage(InitiatingMessage::PduSessionResourceSetupRequest(
             PduSessionResourceSetupRequest {
@@ -145,30 +144,46 @@ impl MockGnb {
         };
         info!(self.logger, "Ngap PduSessionResourceSetupRequest <<");
 
-        let xfer = PduSessionResourceSetupRequestTransfer::from_bytes(
+        self.update_session(
+            pdu_session_id,
+            ue,
             &pdu_session_resource_setup_request_transfer,
         )?;
-        let UpTransportLayerInformation::GtpTunnel(remote_tunnel_info) =
-            xfer.ul_ngu_up_tnl_information;
-        let local_teid = [0, 1, 0, 1];
+
         let pdu = build_ngap::pdu_session_resource_setup_response(
             amf_ue_ngap_id,
             ran_ue_ngap_id,
             &self.local_ip,
-            &local_teid,
+            &ue.session.as_ref().unwrap().local_teid.0,
         )?;
+
+        info!(self.logger, "Ngap PduSessionResourceSetupResponse >>");
+        self.send(&pdu, None).await;
+        ue.nas = Some(nas_bytes);
+        Ok(())
+    }
+
+    fn update_session(
+        &self,
+        pdu_session_id: PduSessionId,
+        ue: &mut UeContext,
+        pdu_session_resource_setup_request_transfer_bytes: &[u8],
+    ) -> Result<()> {
+        let xfer = PduSessionResourceSetupRequestTransfer::from_bytes(
+            pdu_session_resource_setup_request_transfer_bytes,
+        )?;
+        let UpTransportLayerInformation::GtpTunnel(remote_tunnel_info) =
+            xfer.ul_ngu_up_tnl_information;
+        let local_teid = [0, 1, 0, 1];
         ue.session = Some(Session {
             pdu_session_id,
             remote_tunnel_info,
             local_teid: GtpTeid(local_teid),
         });
-
-        info!(self.logger, "Ngap PduSessionResourceSetupResponse >>");
-        self.send(&pdu, None).await;
-        Ok(nas_bytes)
+        Ok(())
     }
 
-    pub async fn handle_pdu_session_resource_release(&self, ue: &mut UeContext) -> Result<Vec<u8>> {
+    pub async fn handle_pdu_session_resource_release(&self, ue: &mut UeContext) -> Result<()> {
         let pdu = self.receive_pdu().await?;
         let NgapPdu::InitiatingMessage(InitiatingMessage::PduSessionResourceReleaseCommand(
             PduSessionResourceReleaseCommand {
@@ -197,14 +212,16 @@ impl MockGnb {
         )?;
         info!(self.logger, "Ngap PduSessionResourceReleaseResponse >>");
         self.send(&pdu, None).await;
+        ue.nas = Some(nas.0);
 
-        Ok(nas.0)
+        Ok(())
     }
 
     pub async fn send_nas(
         &self,
         ue: &UeContext,
         nas_bytes: Vec<u8>,
+        guti: &Option<[u8; 10]>,
         logger: &Logger,
     ) -> Result<()> {
         // Use an NG Initial UE Message or NG Uplink NAS transport depending on whether we have a NGAP UE
@@ -236,17 +253,22 @@ impl MockGnb {
             )
         } else {
             info!(logger, "Ngap InitialUeMessage >>");
-            build_ngap::initial_ue_message(ran_ue_ngap_id, nas_pdu, user_location_information)
+            build_ngap::initial_ue_message(ran_ue_ngap_id, nas_pdu, guti, user_location_information)
         };
         self.send(&pdu, Some(ue.binding.assoc_id)).await;
         Ok(())
     }
 
     pub async fn receive_nas(&self, ue: &mut UeContext, logger: &Logger) -> Result<Vec<u8>> {
+        if let Some(nas) = std::mem::take(&mut ue.nas) {
+            return Ok(nas);
+        }
+
         let pdu = self.receive_pdu().await?;
         let NgapPdu::InitiatingMessage(InitiatingMessage::DownlinkNasTransport(
             DownlinkNasTransport {
                 amf_ue_ngap_id,
+                ran_ue_ngap_id,
                 nas_pdu,
                 ..
             },
@@ -255,6 +277,7 @@ impl MockGnb {
             bail!("Unexpected Ngap message {:?}", pdu);
         };
         info!(logger, "Ngap DownlinkNasTransport <<");
+        assert_eq!(ran_ue_ngap_id.0, ue.ue_id);
 
         if ue.amf_ue_ngap_id.is_none() {
             ue.amf_ue_ngap_id = Some(amf_ue_ngap_id);
@@ -264,16 +287,41 @@ impl MockGnb {
         Ok(nas_pdu.0)
     }
 
+    pub async fn handle_initial_context_setup_with_session(
+        &self,
+        ue: &mut UeContext,
+    ) -> Result<()> {
+        self.handle_initial_context_setup_common(ue, true).await
+    }
+
     pub async fn handle_initial_context_setup(&self, ue: &mut UeContext) -> Result<()> {
+        self.handle_initial_context_setup_common(ue, false).await
+    }
+
+    async fn handle_initial_context_setup_common(
+        &self,
+        ue: &mut UeContext,
+        session: bool,
+    ) -> Result<()> {
         let ReceivedPdu { pdu, assoc_id } = self.receive_pdu_with_assoc_id().await?;
-        self.check_and_store_initial_context_setup_request(pdu, ue)?;
-        info!(&self.logger, "InitialContextSetupRequest <<");
+        let nas_pdu = self.check_and_store_initial_context_setup_request(pdu, ue, session)?;
+        info!(&self.logger, "Ngap InitialContextSetupRequest <<");
+
+        let teid = if session {
+            Some(&ue.session.as_ref().unwrap().local_teid.0)
+        } else {
+            None
+        };
+
         let ue_setup_response = build_ngap::initial_context_setup_response(
             ue.amf_ue_ngap_id.unwrap(),
             RanUeNgapId(ue.ue_id),
+            &self.local_ip,
+            teid,
         );
-        info!(&self.logger, "InitialContextSetupResponse >>");
+        info!(&self.logger, "Ngap InitialContextSetupResponse >>");
         self.send(&ue_setup_response, Some(assoc_id)).await;
+        ue.nas = nas_pdu.map(|x| x.0);
         Ok(())
     }
 
@@ -291,9 +339,15 @@ impl MockGnb {
         &self,
         pdu: Box<NgapPdu>,
         ue: &mut UeContext,
-    ) -> Result<()> {
+        session_reactivation: bool,
+    ) -> Result<Option<NasPdu>> {
         let NgapPdu::InitiatingMessage(InitiatingMessage::InitialContextSetupRequest(
-            InitialContextSetupRequest { amf_ue_ngap_id, .. },
+            InitialContextSetupRequest {
+                amf_ue_ngap_id,
+                pdu_session_resource_setup_list_cxt_req,
+                nas_pdu,
+                ..
+            },
         )) = *pdu
         else {
             bail!("Unexpected Ngap message {:?}", pdu)
@@ -304,7 +358,24 @@ impl MockGnb {
             assert_eq!(ue.amf_ue_ngap_id, Some(amf_ue_ngap_id));
         }
 
-        Ok(())
+        // Store off the uplink GTP information in the case of a session being reactivated.
+        if let Some(pdu_session_resource_setup_list_cxt_req) =
+            pdu_session_resource_setup_list_cxt_req
+        {
+            // We can only cope with a single session right now.
+            assert_eq!(pdu_session_resource_setup_list_cxt_req.0.len(), 1);
+            assert!(session_reactivation);
+            let item = pdu_session_resource_setup_list_cxt_req.0.first();
+            self.update_session(
+                item.pdu_session_id,
+                ue,
+                &item.pdu_session_resource_setup_request_transfer,
+            )?;
+        } else {
+            assert!(!session_reactivation);
+        }
+
+        Ok(nas_pdu)
     }
 
     pub async fn send_ue_context_release_request(&self, ue: &UeContext) -> Result<()> {

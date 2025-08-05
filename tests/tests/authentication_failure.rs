@@ -2,7 +2,7 @@ use qcore_tests::{MockUeF1ap, NGKSI_IN_USE, SYNCH_FAILURE, framework::*};
 
 #[async_std::test]
 async fn authentication_failure() -> anyhow::Result<()> {
-    let (mut du, qc, _dn, sims, logger) = init().await?;
+    let (mut du, qc, _dn, sims, logger) = init_f1ap().await?;
     du.perform_f1_setup(qc.ip_addr()).await?;
     let mut ue = MockUeF1ap::new(nth_imsi(0, &sims), 1, &du, qc.ip_addr(), &logger).await?;
     ue.perform_rrc_setup().await?;
@@ -13,7 +13,7 @@ async fn authentication_failure() -> anyhow::Result<()> {
     ue.handle_rrc_security_mode().await?;
     ue.handle_capability_enquiry().await?;
     ue.handle_nas_registration_accept().await?;
-    ue.receive_nas_configuration_update().await?;
+    ue.handle_nas_configuration_update().await?;
 
     Ok(())
 }

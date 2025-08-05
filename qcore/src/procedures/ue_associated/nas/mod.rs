@@ -8,10 +8,14 @@ mod uplink_nas;
 pub use uplink_nas::*;
 mod session_release;
 pub use session_release::*;
+mod service;
+pub use service::*;
 
 use crate::data::DecodedNas;
 use anyhow::Result;
-use oxirush_nas::{Nas5gsMessage, Nas5gsmMessage};
+use oxirush_nas::{
+    Nas5gsMessage, Nas5gsmMessage, NasFGsMobileIdentity, NasPduSessionStatus, NasUplinkDataStatus,
+};
 
 pub trait NasBase {
     async fn nas_request<T>(
@@ -34,6 +38,14 @@ pub trait NasBase {
         filter: fn(Nas5gsmMessage) -> Option<T>,
         expected: &str,
     ) -> Result<T>;
+
+    async fn allocate_tmsi(&mut self) -> NasFGsMobileIdentity;
+
+    async fn reconcile_sessions(
+        &mut self,
+        uplink_data_status: &Option<NasUplinkDataStatus>,
+        pdu_session_status: &Option<NasPduSessionStatus>,
+    ) -> Result<(u16, u16)>;
 }
 
 mod prelude {

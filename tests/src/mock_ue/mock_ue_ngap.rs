@@ -6,10 +6,14 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{GnbUeContext, MockGnb, MockUe, mock_ue::Transport, packet::Packet};
+use crate::{
+    GnbUeContext, MockGnb, MockUe,
+    mock_ue::{MockUe5GCData, Transport},
+    packet::Packet,
+};
 
 pub struct MockUeNgap<'a> {
-    base: MockUe<UeNgapMode<'a>>,
+    pub base: MockUe<UeNgapMode<'a>>,
 }
 impl<'a> Deref for MockUeNgap<'a> {
     type Target = MockUe<UeNgapMode<'a>>;
@@ -23,6 +27,13 @@ impl DerefMut for MockUeNgap<'_> {
         &mut self.base
     }
 }
+
+impl From<MockUeNgap<'_>> for MockUe5GCData {
+    fn from(val: MockUeNgap<'_>) -> Self {
+        val.base.data
+    }
+}
+
 pub struct UeNgapMode<'a> {
     gnb: &'a MockGnb,
     pub gnb_ue_context: GnbUeContext,
@@ -38,9 +49,14 @@ impl<'a> UeNgapMode<'a> {
 
 #[async_trait]
 impl<'a> Transport for UeNgapMode<'a> {
-    async fn send_nas(&mut self, nas_bytes: Vec<u8>, logger: &Logger) -> Result<()> {
+    async fn send_nas(
+        &mut self,
+        nas_bytes: Vec<u8>,
+        guti: &Option<[u8; 10]>,
+        logger: &Logger,
+    ) -> Result<()> {
         self.gnb
-            .send_nas(&self.gnb_ue_context, nas_bytes, logger)
+            .send_nas(&self.gnb_ue_context, nas_bytes, guti, logger)
             .await
     }
 
@@ -67,6 +83,22 @@ impl<'a> Transport for UeNgapMode<'a> {
 }
 
 impl<'a> MockUeNgap<'a> {
+    pub async fn new_from_base(
+        data: MockUe5GCData,
+        ue_id: u32,
+        gnb: &'a MockGnb,
+        amf_ip_addr: &IpAddr,
+        logger: &Logger,
+    ) -> Result<Self> {
+        let transport = UeNgapMode {
+            gnb,
+            gnb_ue_context: gnb.new_ue_context(ue_id, amf_ip_addr).await?,
+        };
+        Ok(MockUeNgap {
+            base: MockUe::new_from_base(data, ue_id, transport, logger),
+        })
+    }
+
     pub async fn new(
         imsi: String,
         ue_id: u32,
@@ -90,7 +122,7 @@ impl<'a> MockUeNgap<'a> {
         cu_ip_addr: &IpAddr,
         logger: &Logger,
     ) -> Result<Self> {
-        let mut ue = MockUeNgap::new(imsi, ue_id, &gnb, cu_ip_addr, &logger).await?;
+        let mut ue = MockUeNgap::new(imsi, ue_id, gnb, cu_ip_addr, logger).await?;
         ue.send_nas_register_request().await?;
         ue.handle_nas_authentication().await?;
         ue.handle_nas_security_mode().await?;
@@ -99,7 +131,7 @@ impl<'a> MockUeNgap<'a> {
         gnb.send_ue_radio_capability_info(ue.gnb_ue_context())
             .await?;
         ue.handle_nas_registration_accept().await?;
-        ue.receive_nas_configuration_update().await?;
+        ue.handle_nas_configuration_update().await?;
         Ok(ue)
     }
 
@@ -110,14 +142,13 @@ impl<'a> MockUeNgap<'a> {
         cu_ip_addr: &IpAddr,
         logger: &Logger,
     ) -> Result<Self> {
-        let mut ue = MockUeNgap::new_registered(imsi, ue_id, &gnb, cu_ip_addr, &logger).await?;
+        let mut ue = MockUeNgap::new_registered(imsi, ue_id, gnb, cu_ip_addr, logger).await?;
 
         // UE establishes PDU session
         ue.send_nas_pdu_session_establishment_request().await?;
-        let nas_accept = gnb
-            .handle_pdu_session_resource_setup_with_session_accept(ue.gnb_ue_context())
+        gnb.handle_pdu_session_resource_setup(ue.gnb_ue_context())
             .await?;
-        ue.handle_session_accept(nas_accept)?;
+        ue.receive_nas_session_accept().await?;
         Ok(ue)
     }
 
@@ -127,6 +158,9 @@ impl<'a> MockUeNgap<'a> {
 
     pub async fn send_nas_register_request(&mut self) -> Result<()> {
         let nas_bytes = self.build_register_request()?;
-        self.send_nas(nas_bytes).await
+
+        // On a GUTI register request, the UE does not include the STMSI in its Rrc Setup Complete
+        // so it is not available to look up the NAS context.
+        self.send_nas_no_outer_stmsi(nas_bytes).await
     }
 }

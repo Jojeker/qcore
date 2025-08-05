@@ -2,7 +2,7 @@ use qcore_tests::{MockUeF1ap, framework::*};
 
 #[async_std::test]
 async fn guti_registration_f1ap() -> anyhow::Result<()> {
-    let (mut du, qc, _dn, sims, logger) = init().await?;
+    let (mut du, qc, _dn, sims, logger) = init_f1ap().await?;
 
     // Register a UE
     du.perform_f1_setup(qc.ip_addr()).await?;
@@ -13,11 +13,11 @@ async fn guti_registration_f1ap() -> anyhow::Result<()> {
     ue.handle_rrc_security_mode().await?;
     ue.handle_capability_enquiry().await?;
     ue.handle_nas_registration_accept().await?;
-    ue.receive_nas_configuration_update().await?;
+    ue.handle_nas_configuration_update().await?;
 
     // In the first variant, the UE message handler is not running.
 
-    // Drop the UE context causing the message handler to exit and park the NAS context.
+    // Drop the UE context causing the message handler to exit and park the core context.
     du.send_ue_context_release_request(ue.du_ue_context())
         .await?;
     du.handle_ue_context_release(ue.du_ue_context()).await?;
@@ -28,7 +28,7 @@ async fn guti_registration_f1ap() -> anyhow::Result<()> {
     ue.handle_rrc_security_mode().await?;
     ue.handle_capability_enquiry().await?;
     ue.handle_nas_registration_accept().await?;
-    ue.receive_nas_configuration_update().await?;
+    ue.handle_nas_configuration_update().await?;
 
     // In the second variant, the UE message handler is running.
 
@@ -41,7 +41,7 @@ async fn guti_registration_f1ap() -> anyhow::Result<()> {
     ue.handle_rrc_security_mode().await?;
     ue.handle_capability_enquiry().await?;
     ue.handle_nas_registration_accept().await?;
-    ue.receive_nas_configuration_update().await?;
+    ue.handle_nas_configuration_update().await?;
 
     Ok(())
 }
