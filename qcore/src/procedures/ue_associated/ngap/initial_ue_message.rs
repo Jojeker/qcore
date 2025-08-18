@@ -1,11 +1,12 @@
 use super::prelude::*;
-use crate::procedures::ue_associated::UplinkNasProcedure;
 use ngap::{InitialUeMessage, UserLocationInformation, UserLocationInformationNr};
 
-define_ue_procedure!(InitialUeMessageProcedure);
-
-impl<'a, A: HandlerApi> InitialUeMessageProcedure<'a, A> {
-    pub async fn run(mut self, r: Box<InitialUeMessage>) -> Result<()> {
+impl<'a, B: RanUeBase> NgapUeProcedure<'a, B> {
+    pub async fn initial_ue_message(
+        &mut self,
+        r: Box<InitialUeMessage>,
+        core_context: &'a mut UeContext5GC,
+    ) -> Result<()> {
         self.log_message(">> Ngap InitialUeMessage");
 
         let UserLocationInformation::UserLocationInformationNr(UserLocationInformationNr {
@@ -18,7 +19,12 @@ impl<'a, A: HandlerApi> InitialUeMessageProcedure<'a, A> {
         };
         self.ue.remote_ran_ue_id = r.ran_ue_ngap_id.0;
         self.ue.nr_cgi = Some(nr_cgi);
-        self.ue.core.tac = tai.tac.0;
+        self.ue.tac = tai.tac.0;
+
+        // The UE technically isn't CM-Connected until the N2 context is established
+        // (TS23.501, figure 5.3.3.2.4-2), but from an info logging point of view, this is the best place to
+        // introduce the new UE ID.
+        info!(self.logger, "New UE RAN connection");
 
         let stmsi: Option<Vec<u8>> = r.five_g_s_tmsi.map(|x| {
             let mut stmsi = x.amf_set_id.0.clone();
@@ -28,8 +34,8 @@ impl<'a, A: HandlerApi> InitialUeMessageProcedure<'a, A> {
             stmsi
         });
 
-        UplinkNasProcedure::new(self.0)
-            .run_initial(r.nas_pdu.0, stmsi.as_deref())
+        self.nas_procedure(core_context)
+            .initial_nas(r.nas_pdu.0, stmsi.as_deref())
             .await
     }
 }

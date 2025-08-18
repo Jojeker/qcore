@@ -1,12 +1,8 @@
 use super::prelude::*;
-use crate::rrc_request_filter;
-use f1ap::SrbId;
 use rrc::{C1_6, UlDcchMessage, UlDcchMessageType};
 
-define_ue_procedure!(RrcSecurityModeProcedure);
-
-impl<'a, A: HandlerApi> RrcSecurityModeProcedure<'a, A> {
-    pub async fn run(mut self, kgnb: &[u8; 32]) -> Result<UeProcedure<'a, A>> {
+impl<'a, B: RrcBase> RrcProcedure<'a, B> {
+    pub async fn security_mode(&mut self, kgnb: &[u8; 32]) -> Result<()> {
         self.configure_rrc_security(kgnb);
         let r = crate::rrc::build::security_mode_command(1);
         self.log_message("<< Rrc SecurityModeCommand");
@@ -23,7 +19,7 @@ impl<'a, A: HandlerApi> RrcSecurityModeProcedure<'a, A> {
         {
             Ok(_) => {
                 self.log_message(">> Rrc SecurityModeComplete");
-                Ok(self.0)
+                Ok(())
             }
             Err(_) => {
                 self.log_message(">> Rrc SecurityModeFailure");

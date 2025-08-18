@@ -1,10 +1,9 @@
-use crate::data::UeContext5GC;
+use super::subscriber_db::SubscriberDb;
+use super::userplane::PacketProcessor;
 use crate::f1ap::{F1AP_BIND_PORT, F1AP_SCTP_PPID};
-use crate::nas::Tmsi;
 use crate::ngap::{NGAP_BIND_PORT, NGAP_SCTP_PPID};
 use crate::procedures::{F1apHandler, NgapHandler, UeMessage, UeMessageHandler};
-use crate::userplane::PacketProcessor;
-use crate::{Config, HandlerApi, Sqn, SubscriberAuthParams, SubscriberDb, UserplaneSession};
+use crate::{Config, ProcedureBase, Sqn, SubscriberAuthParams, UeContext5GC, UserplaneSession};
 use anyhow::{Result, anyhow, bail};
 use async_std::{
     channel::{self, Sender},
@@ -26,7 +25,7 @@ use xxap::{
 
 pub type DuServedCells = Vec<GnbDuServedCellsItem>;
 pub type DuId = u64;
-pub type ServedCellsStore = Arc<Mutex<HashMap<DuId, DuServedCells>>>;
+pub type ServedCellsMap = Arc<Mutex<HashMap<DuId, DuServedCells>>>;
 
 #[derive(Clone)]
 pub struct QCore {
@@ -38,7 +37,7 @@ pub struct QCore {
     ue_tasks: Arc<Mutex<HashMap<u32, Sender<UeMessage>>>>,
     sub_db: Arc<Mutex<SubscriberDb>>,
     tmsis: Arc<Mutex<HashMap<[u8; 4], CoreContextLocator>>>,
-    served_cells: ServedCellsStore,
+    served_cells: ServedCellsMap,
     ngap_mode: bool,
 }
 
@@ -70,6 +69,7 @@ impl QCore {
         logger: Logger,
         sub_db: SubscriberDb,
         ngap_mode: bool,
+        userplane_stats: bool,
     ) -> Result<ProgramHandle> {
         let local_ip = config.ip_addr;
         let mut ebpf = PacketProcessor::install_ebpf(
@@ -84,9 +84,10 @@ impl QCore {
             &logger,
             "Serving network name {}", config.serving_network_name
         );
-        info!(&logger, "SST {}", config.sst);
+        info!(&logger, "Supported slice SST {}", config.sst);
 
-        let packet_processor = PacketProcessor::new(config.ue_subnet, &mut ebpf, &logger).await?;
+        let packet_processor =
+            PacketProcessor::new(config.ue_subnet, &mut ebpf, userplane_stats, &logger).await?;
 
         let mut qc =
             Box::new(Self::new(config, packet_processor, logger, sub_db, ngap_mode).await?);
@@ -189,20 +190,20 @@ impl QCore {
 
     async fn put_tmsi(
         &self,
-        tmsi: Tmsi,
+        tmsi: [u8; 4],
         v: CoreContextLocator,
         op: &str,
         ue_id: u32,
         logger: &Logger,
     ) {
-        let old = self.tmsis.lock().await.insert(tmsi.0, v);
+        let old = self.tmsis.lock().await.insert(tmsi, v);
 
         match old {
             Some(CoreContextLocator::Stored(_)) => {
-                warn!(logger, "Duplicate {tmsi} {op} (stored)");
+                warn!(logger, "Duplicate {tmsi:?} {op} (stored)");
             }
             Some(CoreContextLocator::OwnedByUeTask(old_ue_id)) if old_ue_id != ue_id => {
-                warn!(logger, "Duplicate {tmsi} {op} - (owned by {old_ue_id})");
+                warn!(logger, "Duplicate {tmsi:?} {op} - (owned by {old_ue_id})");
             }
             _ => {}
         }
@@ -210,7 +211,7 @@ impl QCore {
 }
 
 #[async_trait]
-impl HandlerApi for QCore {
+impl ProcedureBase for QCore {
     fn config(&self) -> &Config {
         &self.config
     }
@@ -219,7 +220,7 @@ impl HandlerApi for QCore {
         self.ngap_mode
     }
 
-    fn served_cells(&self) -> &ServedCellsStore {
+    fn served_cells(&self) -> &ServedCellsMap {
         &self.served_cells
     }
 
@@ -227,7 +228,7 @@ impl HandlerApi for QCore {
         &self,
         imsi: &str,
     ) -> Option<SubscriberAuthParams> {
-        self.sub_db.lock().await.get_mut(imsi).map(|entry| {
+        self.sub_db.lock().await.0.get_mut(imsi).map(|entry| {
             let pre_increment = entry.clone();
             entry.sqn.inc();
             pre_increment
@@ -244,6 +245,7 @@ impl HandlerApi for QCore {
         self.sub_db
             .lock()
             .await
+            .0
             .get_mut(imsi)
             .ok_or(anyhow!("IMSI not found"))
             .map(|entry| entry.sqn = sqn)
@@ -271,7 +273,7 @@ impl HandlerApi for QCore {
 
     async fn put_core_context(
         &self,
-        tmsi: Tmsi,
+        tmsi: [u8; 4],
         ue_id: u32,
         c: UeContext5GC,
         _ttl_secs: u32,
@@ -281,15 +283,19 @@ impl HandlerApi for QCore {
             .await
     }
 
-    async fn register_new_tmsi(&self, tmsi: Tmsi, ue_id: u32, logger: &Logger) {
+    async fn register_new_tmsi(&self, ue_id: u32, logger: &Logger) -> [u8; 4] {
+        let tmsi: [u8; 4] = rand::random(); // TODO: 0xffffffff is not a valid TMSI (TS23.003, 2.4))
+        debug!(self.logger, "Assigned {:?}", tmsi);
+
         self.put_tmsi(
-            tmsi,
+            tmsi.clone(),
             CoreContextLocator::OwnedByUeTask(ue_id),
             "register",
             ue_id,
             logger,
         )
-        .await
+        .await;
+        tmsi
     }
 
     async fn spawn_ue_message_handler(&self) -> u32 {
@@ -340,9 +346,9 @@ impl HandlerApi for QCore {
         <Stack as IndicationHandler<P>>::handle(&self.stack, *r, logger).await
     }
 
-    async fn reserve_userplane_session(&self, logger: &Logger) -> Result<UserplaneSession> {
+    async fn allocate_userplane_session(&self, logger: &Logger) -> Result<UserplaneSession> {
         self.packet_processor
-            .reserve_userplane_session(self.config().five_qi, self.config().pdcp_sn_length, logger)
+            .allocate_userplane_session(self.config().five_qi, self.config().pdcp_sn_length, logger)
             .await
     }
 

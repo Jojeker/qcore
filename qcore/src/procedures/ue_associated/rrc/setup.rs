@@ -1,15 +1,16 @@
 use super::prelude::*;
-use crate::procedures::ue_associated::UplinkNasProcedure;
-use f1ap::SrbId;
 use rrc::{
     C1_6, CriticalExtensions22, Ng5gSTmsi, Ng5gSTmsiValue, RrcSetupComplete, RrcSetupRequest,
     UlDcchMessageType,
 };
 
-define_ue_procedure!(RrcSetupProcedure);
-
-impl<'a, A: HandlerApi> RrcSetupProcedure<'a, A> {
-    pub async fn run(mut self, _r: Box<RrcSetupRequest>, cell_group_config: Vec<u8>) -> Result<()> {
+impl<'a, B: RrcBase> RrcProcedure<'a, B> {
+    pub async fn setup(
+        &mut self,
+        _r: Box<RrcSetupRequest>,
+        cell_group_config: Vec<u8>,
+        core_context: &'a mut UeContext5GC,
+    ) -> Result<()> {
         self.log_message(">> Rrc SetupRequest");
 
         let rrc_setup = crate::rrc::build::setup(0, cell_group_config);
@@ -36,8 +37,8 @@ impl<'a, A: HandlerApi> RrcSetupProcedure<'a, A> {
             None
         };
 
-        UplinkNasProcedure::new(self.0)
-            .run_initial(
+        self.nas_procedure(core_context)
+            .initial_nas(
                 rrc_setup_complete_ies.dedicated_nas_message.0,
                 stmsi.as_deref(),
             )

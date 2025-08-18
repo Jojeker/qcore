@@ -1,22 +1,16 @@
 use super::prelude::*;
-use crate::{nas::*, nas_filter};
+use crate::nas::*;
 use oxirush_nas::{
-    Nas5gmmMessage, Nas5gsMessage, NasFGsMobileIdentity, decode_nas_5gs_message,
-    messages::NasServiceRequest,
+    Nas5gmmMessage, Nas5gsMessage, decode_nas_5gs_message, messages::NasServiceRequest,
 };
 
-define_ue_procedure!(ServiceProcedure);
-
-impl<'a, A: HandlerApi> ServiceProcedure<'a, A> {
-    pub async fn run(mut self, r: Box<NasServiceRequest>) -> Result<()> {
+impl<'a, B: NasBase> NasProcedure<'a, B> {
+    pub async fn service(&mut self, r: Box<NasServiceRequest>) -> Result<()> {
         self.log_message(">> Nas ServiceRequest");
 
         // Ensure that the UE security context has been retrieved based on the TMSI in the outer message.
-        if !self.ue.core.nas.security_activated() {
-            warn!(
-                self.logger,
-                "Rejecting Service Request with unknown or missing TMSI in outer message"
-            );
+        if !self.ue.nas.security_activated() {
+            warn!(self.logger, "Rejecting Nas Service Request - unknown TMSI");
             self.reject(FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED)
                 .await?;
             return Ok(());
@@ -26,7 +20,7 @@ impl<'a, A: HandlerApi> ServiceProcedure<'a, A> {
         let mut tmsi_matches = false;
         if let Ok(MobileIdentity::STmsi(x)) = crate::nas::parse::fgs_mobile_identity(&r.fg_s_tmsi) {
             if let Some(tmsi) = &self.ue.tmsi {
-                if tmsi.0 == *x.1 && self.config().amf_ids[1..3] == x.0.0 {
+                if tmsi.0 == x.1.0 && self.api.config().amf_ids.0[1..3] == x.0.0 {
                     tmsi_matches = true;
                 }
             } else {
@@ -69,39 +63,27 @@ impl<'a, A: HandlerApi> ServiceProcedure<'a, A> {
             )
             .await?;
 
+        info!(
+            self.logger,
+            "UE service request - reactivate existing session(s)"
+        );
+
         let accept = crate::nas::build::service_accept(active_sessions, reactivation_result);
         self.log_message("<< Nas ServiceAccept");
-        self.0 = self.0.ran_context_create(accept).await?;
+        self.ran_context_create(accept).await?;
 
         // Regenerate GUTI and send a configuration update to update it.
         // TODO: actually the new GUTI should only be stored after the configuration update
         // has been acknowledged - TS 24.501, 5.4.4.4
         //   If a new 5G-GUTI was included in the CONFIGURATION UPDATE COMMAND message, the AMF shall
         //   consider the new 5G-GUTI as valid and the old 5G-GUTI as invalid.
-        let guti = self.allocate_tmsi().await;
-        self.perform_configuration_update(guti).await?;
-
-        Ok(())
+        let guti = self.allocate_guti().await;
+        self.perform_configuration_update(Some(guti)).await
     }
 
     async fn reject(&mut self, cause: u8) -> Result<()> {
         let reject = crate::nas::build::service_reject(cause);
         self.log_message("<< Nas ServiceReject");
-        self.nas_indication(reject).await
-    }
-
-    // TODO: commonize with registration.rs
-    async fn perform_configuration_update(&mut self, guti: NasFGsMobileIdentity) -> Result<()> {
-        let command = crate::nas::build::configuration_update_command(None, Some(guti));
-        self.log_message("<< Nas ConfigurationUpdateCommand");
-        let _configuration_update_complete = self
-            .nas_request(
-                command,
-                nas_filter!(ConfigurationUpdateComplete),
-                "Configuration update complete",
-            )
-            .await?;
-        self.log_message(">> Nas ConfigurationUpdateComplete");
-        Ok(())
+        self.send_nas(reject).await
     }
 }

@@ -1,27 +1,29 @@
+use super::prelude::*;
 use asn1_per::SerDes;
 use ngap::{InitialContextSetupResponse, PduSessionResourceSetupUnsuccessfulTransfer};
 
-use crate::data::PduSession;
-
-use super::prelude::*;
-
-define_ue_procedure!(InitialContextSetupProcedure);
-
-impl<'a, A: HandlerApi> InitialContextSetupProcedure<'a, A> {
-    pub async fn run(mut self, kgnb: &[u8; 32], nas_pdu: Vec<u8>) -> Result<UeProcedure<'a, A>> {
+impl<'a, B: RanUeBase> NgapUeProcedure<'a, B> {
+    pub async fn initial_context_setup(
+        &self,
+        kgnb: &[u8; 32],
+        nas_pdu: Vec<u8>,
+        session_list: &mut Vec<PduSession>,
+        ue_security_capabilities: &[u8; 2],
+    ) -> Result<()> {
         let initial_context_setup_request = crate::ngap::build::initial_context_setup_request(
-            self.config().guami(),
+            self.api.config(),
             kgnb,
-            self.config().sst,
             Some(nas_pdu),
             self.ue,
-            self.config().ip_addr.into(),
+            session_list,
+            ue_security_capabilities,
         )?;
         self.log_message("<< Ngap InitialContextSetupRequest");
         let rsp = self
+            .api
             .xxap_request::<ngap::InitialContextSetupProcedure>(
                 initial_context_setup_request,
-                self.logger,
+                &self.logger,
             )
             .await?;
         self.log_message(">> Ngap InitialContextSetupResponse");
@@ -29,13 +31,11 @@ impl<'a, A: HandlerApi> InitialContextSetupProcedure<'a, A> {
         // Go through each PDU session on the UE reactivating it.  Delete if the reactivation failed.
         // TODO: commonize setting of remote tunnel info and error handling in Ngap PduSessionResourceSetupResponse,
         // Ngap InitialContextSetupResponse and F1ap UeContextSetupResponse
-        let sessions = std::mem::take(&mut self.ue.core.pdu_sessions);
+        let sessions = std::mem::take(session_list);
         for mut session in sessions.into_iter() {
-            match self.connect_matching_session(&mut session, &rsp) {
+            match self.connect_matching_session(&mut session, &rsp).await {
                 Ok(()) => {
-                    self.commit_userplane_session(&session.userplane_info, self.logger)
-                        .await?;
-                    self.ue.core.pdu_sessions.push(session);
+                    session_list.push(session);
                 }
 
                 Err(e) => {
@@ -43,7 +43,8 @@ impl<'a, A: HandlerApi> InitialContextSetupProcedure<'a, A> {
                         self.logger,
                         "Failed to reactivate session {} - {e}", session.id
                     );
-                    self.delete_userplane_session(&session.userplane_info, self.logger)
+                    self.api
+                        .delete_userplane_session(&session.userplane_info, &self.logger)
                         .await;
                 }
             }
@@ -61,14 +62,14 @@ impl<'a, A: HandlerApi> InitialContextSetupProcedure<'a, A> {
             )?;
             warn!(
                 self.logger,
-                "GNB error for session {}: {:?}", item.pdu_session_id.0, xfer.cause
+                "gNB error for session {}: {:?}", item.pdu_session_id.0, xfer.cause
             );
         }
 
-        Ok(self.0)
+        Ok(())
     }
 
-    fn connect_matching_session(
+    async fn connect_matching_session(
         &self,
         session: &mut PduSession,
         rsp: &InitialContextSetupResponse,
@@ -79,13 +80,14 @@ impl<'a, A: HandlerApi> InitialContextSetupProcedure<'a, A> {
                 .iter()
                 .find(|item| item.pdu_session_id.0 == session.id)
             {
-                super::connect_session_downlink(
+                self.connect_session_downlink(
                     &matching_item.pdu_session_resource_setup_response_transfer,
                     session,
-                )?;
+                )
+                .await?;
                 return Ok(());
             }
         }
-        bail!("GNB did not supply resource setup response")
+        bail!("gNB did not supply resource setup response")
     }
 }

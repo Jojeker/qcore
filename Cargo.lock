@@ -763,23 +763,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "delegate"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6178a82cf56c836a3ba61a7935cdb1c49bfaa6fa4327cd5bf554a503087de26b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
+
+[[package]]
 name = "deranged"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c9e6a11ca8224451684bc0d7d5a7adbf8f2fd6887261a1cfc3c0432f9d4068e"
 dependencies = [
  "powerfmt",
-]
-
-[[package]]
-name = "derive_deref"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcdbcee2d9941369faba772587a565f4f534e42cb8d17e5295871de730163b2b"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -1372,6 +1372,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nas"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "oxirush-nas",
+ "security",
+]
+
+[[package]]
 name = "neli"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1727,7 +1736,7 @@ dependencies = [
  "aya-log-common",
  "bytes",
  "clap",
- "derive_deref",
+ "delegate",
  "ebpf-common",
  "f1ap",
  "hex",
@@ -1735,6 +1744,7 @@ dependencies = [
  "index-pool",
  "libc",
  "local-ip-address",
+ "nas",
  "ngap",
  "num_cpus",
  "oxirush-nas",

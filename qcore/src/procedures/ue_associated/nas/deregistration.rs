@@ -1,10 +1,11 @@
 use super::prelude::*;
 use oxirush_nas::messages::NasDeregistrationRequestFromUe;
 
-define_ue_procedure!(DeregistrationProcedure);
-
-impl<'a, A: HandlerApi> DeregistrationProcedure<'a, A> {
-    pub async fn run(self, _r: NasDeregistrationRequestFromUe) -> Result<()> {
+impl<'a, B: NasBase> NasProcedure<'a, B> {
+    pub async fn deregistration_from_ue(
+        &mut self,
+        _r: NasDeregistrationRequestFromUe,
+    ) -> Result<()> {
         self.log_message(">> Nas DeregistrationRequestFromUe");
 
         info!(self.logger, "UE deregistration");
@@ -12,8 +13,10 @@ impl<'a, A: HandlerApi> DeregistrationProcedure<'a, A> {
         // TODO - send NAS deregistration accept (UE originating de-registration).
         // Is this piggy-backed in the RRC Container on the F1 Context Release Command?
 
-        // Return an error to get the UE message handler to self-destruct
-        // and free up the userplane sessions and channel.
-        bail!("Normal deregistration")
+        // TODO - should we release the RAN context, or is that up to the lower layers?
+        // TODO - we should destroy the UE's 5GC state at this point, whereas in fact we
+        // will currently store it off against the TMSI.
+        self.api.disconnect_ue();
+        Ok(())
     }
 }

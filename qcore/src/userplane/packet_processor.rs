@@ -31,7 +31,12 @@ type UplinkForwardingTable = Array<MapData, UlForwardingEntry>;
 type DownlinkForwardingTable = Array<MapData, DlForwardingEntry>;
 
 impl PacketProcessor {
-    pub async fn new(ue_subnet: Ipv4Addr, ebpf: &mut Ebpf, logger: &Logger) -> Result<Self> {
+    pub async fn new(
+        ue_subnet: Ipv4Addr,
+        ebpf: &mut Ebpf,
+        userplane_stats: bool,
+        logger: &Logger,
+    ) -> Result<Self> {
         let mut index_pool = IndexPool::new();
         // Take the 0 and 1 slots, so that the first UE gets an IP address ending in .2.
         let _ = index_pool.request_id(0);
@@ -43,7 +48,9 @@ impl PacketProcessor {
         let dl_forwarding_table = Array::try_from(ebpf.take_map("DL_FORWARDING_TABLE").unwrap())?;
 
         // Spawn the stats task
-        let _stats_task = async_std::task::spawn(dump_stats(logger.clone(), counters));
+        if userplane_stats {
+            let _stats_task = async_std::task::spawn(dump_stats(logger.clone(), counters));
+        }
 
         Ok(PacketProcessor {
             index_pool,
@@ -112,7 +119,7 @@ impl PacketProcessor {
     }
 
     /// Allocates an IP address and TEID for a userplane session.
-    pub async fn reserve_userplane_session(
+    pub async fn allocate_userplane_session(
         &self,
         five_qi: u8,
         pdcp_sn_length: PdcpSequenceNumberLength,
@@ -155,12 +162,12 @@ impl PacketProcessor {
 
         info!(
             logger,
-            "Activate userplane session {}, remote {}-{}, 5QI={}, sn-length={}",
-            session,
+            "Activate userplane session UE IP {}, local teid {:08}, remote {}-{:08}, 5QI={}",
+            session.ue_ip_addr,
+            session.uplink_gtp_teid,
             remote_tunnel_info.transport_layer_address,
             remote_tunnel_info.gtp_teid,
             session.five_qi,
-            session.pdcp_sn_length
         );
 
         // TODO: Once we implement downlink buffering, could split this into a command that starts buffering downlink packets, and
@@ -225,7 +232,10 @@ impl PacketProcessor {
             warn!(logger, "Error returning UE index {} - {}", idx, e)
         }
 
-        info!(logger, "Deleted userplane session {}", session);
+        info!(
+            logger,
+            "Deleted userplane session UE IP {}", session.ue_ip_addr
+        );
     }
 
     async fn clear_forwarding_entries(&self, idx: u32, logger: &Logger) {
