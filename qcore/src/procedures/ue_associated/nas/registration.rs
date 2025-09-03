@@ -19,17 +19,21 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
                 let guti = self.allocate_guti().await;
                 let accept =
                     self.build_registration_accept(guti, reactivation_result, current_sessions);
-                self.ran_context_create(accept).await?;
-                self.receive_registration_complete().await?;
-                self.perform_configuration_update(None).await
+                self.ran_context_create(accept)
+                    .await
+                    .context("context creation")?;
+                self.receive_registration_complete()
+                    .await
+                    .context("awaiting registration complete")?;
+                self.perform_configuration_update(None)
+                    .await
+                    .context("configuration update")
             }
-            Err(cause) => {
-                if cause == ABORT_PROCEDURE {
-                    bail!("Abort registration procedure")
-                } else {
-                    self.reject_registration(cause).await
-                }
+            Err(NasProcedureError::Fail(cause, err)) => {
+                warn!(self.logger, "Reject registration: {:#}", err);
+                self.reject_registration(cause).await
             }
+            Err(NasProcedureError::Abort(cause)) => Err(cause),
         }
     }
 
@@ -91,7 +95,7 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
     async fn validate_registration(
         &mut self,
         request: Box<NasRegistrationRequest>,
-    ) -> Result<Box<NasRegistrationRequest>, u8> {
+    ) -> Result<Box<NasRegistrationRequest>, NasProcedureError> {
         self.log_message(">> Nas RegistrationRequest");
 
         // If this is a registration update and security is not activated then we failed to retrieve the UE context
@@ -100,14 +104,15 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
             != REGISTRATION_TYPE_INITIAL;
 
         if is_registration_update && !self.ue.nas.security_activated() {
-            warn!(
-                self.logger,
-                "Reject security protected registration update with unknown or missing TMSI in outer message"
-            );
             // TS24.501 5.5.1.3.5
             // "The UE shall enter the state 5GMM-DEREGISTERED.NORMAL-SERVICE. The UE shall delete any mapped 5G NAS
             // security context or partial native 5G NAS security context."
-            return Err(FGMM_CAUSE_IMPLICITLY_DEREGISTERED);
+            return Err(NasProcedureError::Fail(
+                FGMM_CAUSE_IMPLICITLY_DEREGISTERED,
+                anyhow!(
+                    "Reject security protected registration update with unknown or missing TMSI in outer message"
+                ),
+            ));
         };
 
         // The UE is authenticated based on cleartext IEs in the outer message.  Any non-cleartext IEs (such as those
@@ -150,45 +155,39 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
         // Decode (but do not admit) the registration request in the NAS message container.
         let value = nas_message_container.value;
         let nas = Box::new(decode_nas_5gs_message(&value).map_err(|e| {
-            warn!(
-                self.logger,
-                "NAS decode error - {e} - message bytes: {:?}", value
-            );
-            ABORT_PROCEDURE
+            NasProcedureError::Abort(anyhow!(
+                "NAS decode error - {e} - message bytes: {:?}",
+                value
+            ))
         })?);
         if let Nas5gsMessage::Gmm(_, Nas5gmmMessage::RegistrationRequest(registration_request)) =
             *nas
         {
             Ok(Box::new(registration_request))
         } else {
-            warn!(
-                self.logger,
-                "Nas message container contained non-registration Nas message {:?}", nas
-            );
-            Err(ABORT_PROCEDURE)
+            Err(NasProcedureError::Abort(anyhow!(
+                "Nas message container contained non-registration Nas message {:?}",
+                nas
+            )))
         }
     }
 
-    async fn query_ue_identity(&mut self) -> Result<Imsi, u8> {
-        self.identity().await.map_err(|e| {
-            warn!(self.logger, "Identity procedure failed - {e}");
-            FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED
-        })
+    async fn query_ue_identity(&mut self) -> Result<Imsi, NasProcedureError> {
+        self.identity()
+            .await
+            .map_err(|e| NasProcedureError::Fail(FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED, e))
     }
 
     async fn supi_registration(
         &mut self,
         imsi: &str,
         ue_security_capability: &NasUeSecurityCapability,
-    ) -> Result<NasMessageContainer, u8> {
+    ) -> Result<NasMessageContainer, NasProcedureError> {
         info!(self.logger, "Registering imsi-{imsi}");
         self.authentication(imsi).await?;
         self.activate_nas_security(ue_security_capability)
             .await
-            .map_err(|e| {
-                warn!(self.logger, "Failure during NAS security activation - {e}");
-                ABORT_PROCEDURE
-            })
+            .map_err(|e| NasProcedureError::Abort(e.context("activating NAS security")))
     }
 
     async fn activate_nas_security(
@@ -207,22 +206,19 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
     fn check_registration_request(
         &self,
         registration_request: &NasRegistrationRequest,
-    ) -> Result<(RegistrationType, NasUeSecurityCapability), u8> {
+    ) -> Result<(RegistrationType, NasUeSecurityCapability), NasProcedureError> {
         let Some(ue_security_capability) = registration_request.ue_security_capability.clone()
         else {
-            warn!(
-                self.logger,
-                "UE security capability missing from Registration Request"
-            );
-            return Err(FGMM_CAUSE_IE_NONEXISTENT_OR_NOT_IMPLEMENTED);
+            return Err(NasProcedureError::Fail(
+                FGMM_CAUSE_IE_NONEXISTENT_OR_NOT_IMPLEMENTED,
+                anyhow!("UE security capability missing from Registration Request"),
+            ));
         };
 
         let (plmn, ret) =
             match crate::nas::parse::fgs_mobile_identity(&registration_request.fgs_mobile_identity)
-                .map_err(|e| {
-                    warn!(self.logger, "{e}");
-                    FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED
-                })? {
+                .map_err(|e| NasProcedureError::Fail(FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED, e))?
+            {
                 MobileIdentity::Guti(Guti(plmn, _amf_ids, _tmsi)) => {
                     (plmn, (RegistrationType::Guti, ue_security_capability))
                 }
@@ -230,24 +226,26 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
                     (plmn, (RegistrationType::Supi(imsi), ue_security_capability))
                 }
                 x => {
-                    warn!(
-                        self.logger,
-                        "Expected Guti or Supi identity on a registration request, got {x:?}",
-                    );
-                    return Err(FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED);
+                    return Err(NasProcedureError::Fail(
+                        FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED,
+                        anyhow!(
+                            "Expected Guti or Supi identity on a registration request, got {x:?}"
+                        ),
+                    ));
                 }
             };
 
         if plmn != self.api.config().plmn {
             // This will cause authentication to fail, because the UE will form its
             // serving network name using its MCC/MNC, and we form ours using our MCC/MNC.
-            warn!(
-                self.logger,
-                "UE PLMN {:?} doesn't match ours {:?}",
-                &plmn,
-                self.api.config().plmn
-            );
-            return Err(FGMM_CAUSE_PLMN_NOT_ALLOWED);
+            return Err(NasProcedureError::Fail(
+                FGMM_CAUSE_PLMN_NOT_ALLOWED,
+                anyhow!(
+                    "UE PLMN {:?} doesn't match ours {:?}",
+                    &plmn,
+                    self.api.config().plmn
+                ),
+            ));
         }
 
         Ok(ret)

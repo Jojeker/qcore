@@ -4,11 +4,11 @@
 - Live testing with multiple phones, update readme documenting interop status.
 
 ## Interop
-- OnePlus: Rejection of Registration Request from Security Mode Command if slice asked for is eMBB / SST 1 with "no network slices available" -  causes OnePlus phone to reregister with MIoT SST 3 / SD 0.
+- OnePlus: Rejection of Registration Request from Security Mode Command if slice asked for is eMBB / SST 1 with "no network slices available" - causes OnePlus phone to reregister with MIoT SST 3 / SD 0.
 - Unhandled RrcReestablishmentRequest
 
 ## Bugs
-- Release cause propagation from RAN release request - tests should validate
+- "slog-async: logger dropped messages due to channel overflow" - for example, when hitting Ctrl-C at end of PacketRusher test
 - Poor download speed in F1ap mode possibly caused by out of order seq nos 
 - PDU session release command should flow on SRB 2, not SRB 1  
 - OAI test broken - simulated UE doesn't send Configuration Update Complete
@@ -26,9 +26,10 @@
 - Reduce number of mandatory command line arguments (e.g. derive IP address from interface, derive MNC/MCC from sims.toml)
 
 ## Function gaps
-- Proper handling of deregistration from UE, including sending of Deregistration accept
+- Implement and test NAS procedure interaction table
+- Registration timeout and refresh (+ update parallelization table)
+- Proper handling of deregistration from UE, including sending of Deregistration accept (+ update parallelization table)
 - Idle / paging
-- Registration timeout and refresh
 - Sessions / IP addresses should not persist forever.  Timeout; flush on TMSI register/service request without session reactivation; flush on IMSI registration? 
 - Large SCTP messages - e.g. unfiltered UE Capability Information
 - UE static IP
@@ -59,6 +60,8 @@
   its session setup request (with no intervening delete) after not liking the response.
 
 ## Tidying + refactoring
+- uplink information transfer in separate module for F1AP?
+- tests are slow to link
 - use different forwarding tables for NGAP vs F1AP 
 - test scripts - move to builder pattern (new_with_base() etc)?
 - struct Config should be split into information that is used on startup (which doesn't need to be cloned), and information that is used by procedures (which does need to be cloned) 

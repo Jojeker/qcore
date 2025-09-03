@@ -28,7 +28,7 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
             FGSM_CAUSE_REGULAR_DEACTIVATION,
         )?;
         self.log_message("<< Nas PduSessionReleaseCommand");
-        let pdu_session_release_command = self.ue.nas.encode(pdu_session_release_command)?;
+        let pdu_session_release_command = self.ue.nas.encode_dl(pdu_session_release_command)?;
         self.api
             .ran_session_release(&released_session, pdu_session_release_command)
             .await?;
@@ -42,7 +42,7 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
                     Nas5gsmMessage::PduSessionReleaseComplete(x) => Some(x),
                     _ => None,
                 },
-                "Pdu session release complete",
+                "Nas PduSessionReleaseComplete",
             )
             .await?;
         self.log_message(">> Nas PduSessionReleaseComplete");

@@ -65,7 +65,7 @@ impl MockGnb {
     }
 
     pub fn plmn(&self) -> PlmnIdentity {
-        PlmnIdentity([0, 0, 0])
+        PlmnIdentity([0x00, 0xf1, 0x10])
     }
 
     pub async fn disconnect(&mut self) {
@@ -236,7 +236,7 @@ impl MockGnb {
                 },
                 tai: Tai {
                     plmn_identity: self.plmn(),
-                    tac: Tac([0, 0, 0]),
+                    tac: Tac([0, 0, 1]),
                 },
                 time_stamp: None,
                 ps_cell_information: None,
@@ -345,7 +345,7 @@ impl MockGnb {
             InitialContextSetupRequest {
                 amf_ue_ngap_id,
                 pdu_session_resource_setup_list_cxt_req,
-                nas_pdu,
+                mut nas_pdu,
                 ..
             },
         )) = *pdu
@@ -365,12 +365,18 @@ impl MockGnb {
             // We can only cope with a single session right now.
             assert_eq!(pdu_session_resource_setup_list_cxt_req.0.len(), 1);
             assert!(session_reactivation);
-            let item = pdu_session_resource_setup_list_cxt_req.0.first();
+            let item = pdu_session_resource_setup_list_cxt_req.0.head;
+
             self.update_session(
                 item.pdu_session_id,
                 ue,
                 &item.pdu_session_resource_setup_request_transfer,
             )?;
+            if let Some(per_session_nas_pdu) = item.nas_pdu {
+                // The test framework can't currently cope with a NAS PDU both at message level and at session level.
+                assert!(nas_pdu.is_none());
+                nas_pdu = Some(per_session_nas_pdu);
+            }
         } else {
             assert!(!session_reactivation);
         }

@@ -12,11 +12,9 @@ pub mod uplink_nas;
 
 pub use nas_base::NasBase;
 
-use crate::{
-    data::UeContext5GC,
-    protocols::nas::{ABORT_PROCEDURE, FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED, Tmsi, parse},
-};
-use anyhow::{Result, ensure};
+use crate::data::UeContext5GC;
+use crate::nas::{Tmsi, parse};
+use anyhow::{Result, anyhow, bail, ensure};
 use nas::DecodedNas;
 use oxirush_nas::{
     Nas5gmmMessage, Nas5gsMessage, Nas5gsmMessage, NasFGsMobileIdentity, NasPduSessionStatus,
@@ -32,7 +30,7 @@ pub struct NasProcedure<'a, B: NasBase> {
 
 impl<'a, B: NasBase> NasProcedure<'a, B> {
     async fn send_nas(&mut self, nas: Box<Nas5gsMessage>) -> Result<()> {
-        let nas_bytes = self.ue.nas.encode(nas)?;
+        let nas_bytes = self.ue.nas.encode_dl(nas)?;
         self.api.send_nas(nas_bytes).await
     }
 
@@ -84,9 +82,24 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
                 }
             }
 
-            // This is not the message we are looking for.  Park the top level NAS PDU.  This is rather inefficient
-            // since it means we will decode the inner message again later.
+            // This is not the message we are looking for.  Is it a message that should abort the current procedure?
+            let result = match *nas.0 {
+                // We consider that if we receive a deregistration request, we should drop whatever we are doing and
+                // immmediately tear down the UE context.  If the UE does in fact respond to whatever is the current
+                // procedure, its response will be queued and then discarded by the context cleanup process.
+                // See testcase deregistration_during_nas_request()
+                Nas5gsMessage::Gmm(_, Nas5gmmMessage::DeregistrationRequestFromUe(_)) => {
+                    Err(anyhow!("UE deregister - abort current procedure"))
+                }
+                _ => Ok(()),
+            };
+
+            // Park the top level NAS PDU.  This is rather inefficient since it means we will decode the inner message
+            // again later.
             self.api.unexpected_nas_pdu(nas, expected)?;
+
+            // Continue waiting or abort as appropriate.
+            result?
         }
     }
 
@@ -101,13 +114,13 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
     }
 
     async fn ran_context_create(&mut self, nas: Box<Nas5gsMessage>) -> Result<()> {
-        let nas = self.ue.nas.encode(nas)?;
+        let nas = self.ue.nas.encode_dl(nas)?;
         debug!(
             self.logger,
             "UL NAS COUNT for kGNB derivation {}",
-            self.ue.nas.ul_nas_count()
+            self.ue.nas.rx_nas_count()
         );
-        let kgnb = security::derive_kgnb(&self.ue.kamf, self.ue.nas.ul_nas_count());
+        let kgnb = security::derive_kgnb(&self.ue.kamf, self.ue.nas.rx_nas_count());
         self.api
             .ran_context_create(
                 &kgnb,
@@ -123,7 +136,7 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
         amf_region: Option<u8>,
         amf_set_and_pointer: &[u8],
         tmsi: &[u8],
-    ) -> Result<bool, u8> {
+    ) -> Result<bool> {
         let guami_matches = amf_set_and_pointer == &self.api.config().amf_ids.0[1..3]
             && amf_region
                 .map(|x| x == self.api.config().amf_ids.0[0])
@@ -143,8 +156,7 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
             if existing_tmsi.0 == tmsi && guami_matches {
                 return Ok(false);
             } else {
-                warn!(self.logger, "UE not using GUTI it was given");
-                return Err(FGMM_CAUSE_UE_IDENTITY_CANNOT_BE_DERIVED);
+                bail!("UE not using GUTI it was given");
             }
         }
 
@@ -153,7 +165,7 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
             match self.api.take_core_context(tmsi).await {
                 Some(c) => {
                     *self.ue = c;
-                    self.ue.tmsi = Some(Tmsi(tmsi.try_into().map_err(|_| ABORT_PROCEDURE)?));
+                    self.ue.tmsi = Some(Tmsi(tmsi.try_into()?));
                     return Ok(false);
                 }
                 None => {
@@ -241,10 +253,27 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum NasProcedureError {
+    #[error("Abort {0}")]
+    Abort(anyhow::Error),
+    #[error("Fail with code {0} {1}")]
+    Fail(u8, anyhow::Error),
+}
+
 mod prelude {
     pub use super::super::prelude::*;
-    pub use super::{NasBase, NasProcedure};
+    pub use super::{NasBase, NasProcedure, NasProcedureError};
     pub use crate::{nas_filter, nas_request_filter};
+}
+
+#[macro_export]
+macro_rules! nas_fail {
+    ($c:expr, $e:expr) => {
+        Err(NasProcedureError::Fail($c, $e))
+    };
 }
 
 #[macro_export]

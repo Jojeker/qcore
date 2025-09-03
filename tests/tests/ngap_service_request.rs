@@ -7,7 +7,7 @@ async fn ngap_service_request() -> anyhow::Result<()> {
     gnb.perform_ng_setup(qc.ip_addr()).await?;
     let ue =
         MockUeNgap::new_with_session(nth_imsi(0, &sims), 1, &gnb, qc.ip_addr(), &logger).await?;
-    qc.wait_until_idle().await;
+    wait_until_idle(&qc).await?;
 
     let mock_ue = ue.into();
 
@@ -25,7 +25,7 @@ async fn ngap_service_request() -> anyhow::Result<()> {
     gnb.handle_initial_context_setup_with_session(ue.gnb_ue_context())
         .await?;
     ue.receive_nas_service_accept().await?;
-    ue.handle_nas_configuration_update().await?;
+    wait_until_idle(&qc).await?;
 
     pass_through_uplink_ipv4(&ue, &dn).await?;
     pass_through_downlink_ipv4(&dn, &ue).await

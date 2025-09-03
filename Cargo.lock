@@ -140,7 +140,7 @@ dependencies = [
  "asn1-codecs",
  "bitvec",
  "nonempty",
- "num_enum 0.5.11",
+ "num_enum",
 ]
 
 [[package]]
@@ -347,12 +347,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic-counter"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62f447d68cfa5a9ab0c1c862a703da2a65b5ed1b7ce1153c9eb0169506d56019"
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,15 +423,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
-]
-
-[[package]]
-name = "aya-log-common"
-version = "0.1.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "befef9fe882e63164a2ba0161874e954648a72b0e1c4b361f532d590638c4eec"
-dependencies = [
- "num_enum 0.7.3",
 ]
 
 [[package]]
@@ -614,9 +599,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.36"
+version = "4.5.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2df961d8c8a0d08aa9945718ccf584145eee3f3aa06cddbeac12933781102e04"
+checksum = "2c5e4fcf9c21d2e544ca1ee9d8552de13019a42aa7dbf32747fa7aaf1df76e57"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -624,9 +609,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.36"
+version = "4.5.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "132dbda40fb6753878316a489d5a1242a8ef2f0d9e47ba01c951ea8aa7d013a5"
+checksum = "fecb53a0e6fcfb055f686001bc2e2592fa527efaf38dbe81a6a9563562e57d41"
 dependencies = [
  "anstream",
  "anstyle",
@@ -636,9 +621,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.5.32"
+version = "4.5.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09176aae279615badda0765c0c0b3f6ed53f4709118af73cf4655d85d1530cd7"
+checksum = "14cb31bb0a7d536caef2639baa7fad459e15c3144efefa6dbd1c84562c4739f6"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -900,7 +885,7 @@ dependencies = [
  "async-trait",
  "hex",
  "nonempty",
- "num_enum 0.5.11",
+ "num_enum",
  "slog",
  "xxap",
 ]
@@ -1321,6 +1306,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
+name = "load-test"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-std",
+ "clap",
+ "qcore-tests",
+ "slog",
+ "slog-async",
+ "slog-envlogger",
+ "slog-term",
+]
+
+[[package]]
 name = "local-ip-address"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1419,7 +1418,7 @@ dependencies = [
  "asn1-per",
  "async-trait",
  "hex",
- "num_enum 0.5.11",
+ "num_enum",
  "slog",
  "xxap",
 ]
@@ -1443,31 +1442,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
 
 [[package]]
-name = "num_cpus"
-version = "1.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4161fcb6d602d4d2081af7c3a45852d875a03dd337a6bfdd6e06407b61342a43"
-dependencies = [
- "hermit-abi 0.3.9",
- "libc",
-]
-
-[[package]]
 name = "num_enum"
 version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f646caf906c20226733ed5b1374287eb97e3c2a5c227ce668c1f2ce20ae57c9"
 dependencies = [
- "num_enum_derive 0.5.11",
-]
-
-[[package]]
-name = "num_enum"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e613fc340b2220f734a8595782c551f1250e969d87d3be1ae0579e8d4065179"
-dependencies = [
- "num_enum_derive 0.7.3",
+ "num_enum_derive",
 ]
 
 [[package]]
@@ -1480,17 +1460,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "num_enum_derive"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af1844ef2428cc3e1cb900be36181049ef3d3193c63e43026cfe202983b27a56"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.100",
 ]
 
 [[package]]
@@ -1530,7 +1499,7 @@ dependencies = [
 [[package]]
 name = "oxirush-nas"
 version = "0.1.2"
-source = "git+https://github.com/nplrkn/oxirush-nas?rev=fceec54#fceec549bf718fc62d4d3936f7dada563ae01fed"
+source = "git+https://github.com/nplrkn/oxirush-nas?rev=1ea425f#1ea425f42bbe03052332a36ec784987a8fb9ad66"
 dependencies = [
  "anyhow",
  "base64",
@@ -1730,23 +1699,19 @@ dependencies = [
  "async-channel 2.3.1",
  "async-std",
  "async-trait",
- "atomic-counter",
  "aya",
  "aya-build",
- "aya-log-common",
  "bytes",
  "clap",
  "delegate",
  "ebpf-common",
  "f1ap",
  "hex",
- "hex-literal 1.0.0",
  "index-pool",
  "libc",
  "local-ip-address",
  "nas",
  "ngap",
- "num_cpus",
  "oxirush-nas",
  "pdcp",
  "rand 0.9.1",
@@ -1778,7 +1743,10 @@ dependencies = [
  "async-std",
  "async-trait",
  "f1ap",
+ "hex",
+ "hex-literal 1.0.0",
  "local-ip-address",
+ "nas",
  "ngap",
  "oxirush-nas",
  "pdcp",
@@ -1786,6 +1754,7 @@ dependencies = [
  "qcore",
  "rand 0.8.5",
  "rrc",
+ "security",
  "slog",
  "slog-envlogger",
  "slog-term",
@@ -1928,7 +1897,7 @@ version = "0.1.0"
 dependencies = [
  "asn1-per",
  "hex",
- "num_enum 0.5.11",
+ "num_enum",
 ]
 
 [[package]]
@@ -2403,7 +2372,7 @@ dependencies = [
  "serde_spanned",
  "toml_datetime",
  "toml_write",
- "winnow 0.7.7",
+ "winnow 0.7.13",
 ]
 
 [[package]]
@@ -2753,9 +2722,9 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "0.7.7"
+version = "0.7.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb8234a863ea0e8cd7284fcdd4f145233eb00fee02bbdd9861aec44e6477bc5"
+checksum = "21a0236b59786fed61e2a80582dd500fe61f18b5dca67a4a067d0bc9039339cf"
 dependencies = [
  "memchr",
 ]
@@ -2802,10 +2771,9 @@ dependencies = [
  "futures",
  "futures-core",
  "futures-lite 1.13.0",
- "hex",
  "libc",
  "log",
- "num_enum 0.5.11",
+ "num_enum",
  "os_socketaddr",
  "slog",
  "stop-token",

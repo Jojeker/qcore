@@ -3,11 +3,11 @@ use crate::{
     data::{UeContext5GC, UeContextRan, UserplaneSession},
     procedures::{
         UeMessage,
-        ue_associated::{F1apUeProcedure, NgapUeProcedure, RanUeBase},
+        ue_associated::{F1apUeProcedure, NgapUeProcedure, RanUeBase, ran_ue_base::ReleaseCause},
     },
     qcore::ServedCellsMap,
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use async_std::channel::{self, Receiver, Sender};
 use f1ap::F1apPdu;
 use ngap::NgapPdu;
@@ -19,59 +19,113 @@ pub struct UeMessageHandler<A: ProcedureBase> {
     api: A,
     logger: Logger,
     queue: VecDeque<UeMessage>,
-    give_context: Option<Sender<UeContext5GC>>,
-    stop: bool,
+    dispatch_status: DispatchStatus,
+    release_cause: ReleaseCause,
 }
 
 impl<A: ProcedureBase> UeMessageHandler<A> {
     pub fn spawn(ue_id: u32, api: A, logger: Logger) -> Sender<UeMessage> {
         let (sender, receiver) = channel::unbounded();
         async_std::task::spawn(async move {
-            let mut handler = UeMessageHandler {
+            UeMessageHandler {
                 receiver,
                 api,
                 logger,
                 queue: VecDeque::new(),
-                give_context: None,
-                stop: false,
-            };
-            if let Err(e) = handler.run(ue_id).await {
-                warn!(handler.logger, "Disconnecting UE: {e}");
+                dispatch_status: DispatchStatus::Continue,
+                release_cause: ReleaseCause::None,
             }
+            .run(ue_id)
+            .await;
         });
         sender
     }
 
-    async fn run(&mut self, ue_id: u32) -> Result<()> {
+    async fn run(&mut self, ue_id: u32) {
         let mut ue = Box::new(UeContext::new(ue_id));
-        let result = self.dispatch_all(&mut ue).await;
+        self.dispatch_all(&mut ue).await;
         self.cleanup(ue).await;
-        result
     }
 
-    async fn dispatch_all(&mut self, ue: &mut UeContext) -> Result<()> {
-        let mut result = Ok(());
-        let mut disconnected = false;
-        loop {
-            // On success, keep dispatching.  On error, release the RAN context as a final
-            // procedure before passing up the error.
-            if result.is_ok() && !self.stop {
-                result = self.dispatch(ue, &mut disconnected).await;
-            } else {
-                if disconnected {
-                    debug!(self.logger, "UE was disconnected - skip RAN release");
-                } else if self.api.ngap_mode() {
-                    self.ngap_ue_procedure(&mut ue.ran)
-                        .ue_context_release()
-                        .await
-                } else {
-                    self.f1ap_ue_procedure(&mut ue.ran)
-                        .ue_context_release()
-                        .await
-                }
+    async fn cleanup(&mut self, mut ue: Box<UeContext>) {
+        self.maybe_release_ran(&mut ue).await;
+        self.deactivate_pdu_sessions(&ue).await;
+        self.give_or_park_core_context(&ue.ran, ue.core).await;
+        self.remove_channel(ue.ran).await;
+    }
 
-                return result;
+    async fn dispatch_all(&mut self, ue: &mut UeContext) {
+        while let DispatchStatus::Continue = self.dispatch_status {
+            if let Err(e) = self.dispatch(ue).await {
+                // {:#} means print the whole error chain
+                warn!(self.logger, "Procedure failure: {:#}", e);
             }
+        }
+    }
+
+    async fn maybe_release_ran(&mut self, ue: &mut UeContext) {
+        if let DispatchStatus::Disconnected = self.dispatch_status {
+            debug!(self.logger, "UE disconnected - skip RAN release");
+        } else if self.api.ngap_mode() {
+            let cause = if let ReleaseCause::Ngap(ref cause) = self.release_cause {
+                cause.clone()
+            } else {
+                ngap::Cause::Nas(ngap::CauseNas::NormalRelease)
+            };
+            self.ngap_ue_procedure(&mut ue.ran)
+                .ue_context_release(cause)
+                .await
+        } else {
+            let cause = if let ReleaseCause::F1ap(ref cause) = self.release_cause {
+                cause.clone()
+            } else {
+                f1ap::Cause::RadioNetwork(f1ap::CauseRadioNetwork::NormalRelease)
+            };
+            self.f1ap_ue_procedure(&mut ue.ran)
+                .ue_context_release(cause)
+                .await
+        }
+    }
+
+    async fn deactivate_pdu_sessions(&mut self, ue: &UeContext) {
+        for session in ue.core.pdu_sessions.iter() {
+            self.api
+                .deactivate_userplane_session(&session.userplane_info, &self.logger)
+                .await;
+        }
+    }
+
+    async fn give_or_park_core_context(
+        &mut self,
+        ue_ran: &UeContextRan,
+        mut ue_core: UeContext5GC,
+    ) {
+        // If the message handler was asked to give away the core context, send it.
+        if let DispatchStatus::ReleaseAndGiveContext(ref sender) = self.dispatch_status {
+            if let Err(e) = sender.send(ue_core).await {
+                warn!(self.logger, "Failed to send core context: {e}");
+            }
+        } else {
+            // If the UE has a TMSI, save off its core context, so that we can recover it based on GUTI later.
+            if let Some(tmsi) = ue_core.tmsi.take() {
+                debug!(self.logger, "Store core context for TMSI {tmsi}");
+                self.api
+                    .put_core_context(tmsi.0, ue_ran.local_ran_ue_id, ue_core, 0, &self.logger)
+                    .await;
+            }
+        }
+    }
+
+    async fn remove_channel(&mut self, ue_ran: UeContextRan) {
+        // Remove the channel to this UE and drop all messages in it.
+        // This must happen after we have stored the core context - see the note on the timing
+        // window in take_core_context().
+        self.api.delete_ue_channel(ue_ran.local_ran_ue_id).await;
+        debug!(self.logger, "Deleted UE channel");
+        self.receiver.close();
+        while !self.receiver.is_empty() {
+            debug!(self.logger, "Receive and discard pending message");
+            let _ = self.receiver.recv().await;
         }
     }
 
@@ -83,7 +137,6 @@ impl<A: ProcedureBase> UeMessageHandler<A> {
             ue,
             logger: self.logger.clone(),
             api: self,
-            release_cause: ngap::Cause::Nas(ngap::CauseNas::NormalRelease),
         }
     }
 
@@ -95,12 +148,11 @@ impl<A: ProcedureBase> UeMessageHandler<A> {
             ue,
             logger: self.logger.clone(),
             api: self,
-            release_cause: f1ap::Cause::RadioNetwork(f1ap::CauseRadioNetwork::NormalRelease),
         }
     }
 
     // Returns Err if the UE handler should exit.
-    pub async fn dispatch(&mut self, ue: &mut UeContext, disconnected: &mut bool) -> Result<()> {
+    pub async fn dispatch(&mut self, ue: &mut UeContext) -> Result<()> {
         // Process any queued messages before going to the inbox.
         let next_message = if let Some(message) = self.queue.pop_front() {
             message
@@ -140,16 +192,15 @@ impl<A: ProcedureBase> UeMessageHandler<A> {
                     &self.logger,
                     "UE changed channel - transfer context and clean up"
                 );
-                self.give_context = Some(sender);
-                Err(anyhow!("Take context"))
+                self.dispatch_status = DispatchStatus::ReleaseAndGiveContext(sender);
+                Ok(())
             }
             UeMessage::Disconnect => {
                 debug!(
                     &self.logger,
                     "UE disconnected - exit message handler and store context"
                 );
-                *disconnected = true;
-                self.stop = true;
+                self.dispatch_status = DispatchStatus::Disconnected;
                 Ok(())
             }
             UeMessage::Ping(sender) => {
@@ -160,65 +211,24 @@ impl<A: ProcedureBase> UeMessageHandler<A> {
         }
     }
 
-    async fn cleanup(&mut self, mut ue_context: Box<UeContext>) {
-        debug!(self.logger, "Clean up UE context");
-
-        // Deactivate sessions.
-        for session in ue_context.core.pdu_sessions.iter() {
-            self.api
-                .deactivate_userplane_session(&session.userplane_info, &self.logger)
-                .await;
-        }
-
-        // If the message handler was asked to give away the core context, send it.
-        if let Some(sender) = self.give_context.take() {
-            if let Err(e) = sender.send(ue_context.core).await {
-                warn!(self.logger, "Failed to send core context: {e}");
-            }
-        } else {
-            // If the UE has a TMSI, save off its core context, so that we can recover it based on GUTI later.
-            if let Some(tmsi) = ue_context.core.tmsi.take() {
-                debug!(self.logger, "Store core context for TMSI {tmsi}");
-                self.api
-                    .put_core_context(
-                        tmsi.0,
-                        ue_context.ran.local_ran_ue_id,
-                        ue_context.core,
-                        0,
-                        &self.logger,
-                    )
-                    .await;
-            }
-        }
-
-        // Remove the channel to this UE and drop all messages in it.
-        // This must happen after we have stored the core context - see the note on the timing
-        // window in take_core_context().
-        self.api
-            .delete_ue_channel(ue_context.ran.local_ran_ue_id)
-            .await;
-        debug!(self.logger, "Deleted UE channel");
-        self.receiver.close();
-        while !self.receiver.is_empty() {
-            debug!(self.logger, "Receive and discard pending message");
-            let _ = self.receiver.recv().await;
-        }
-    }
-
-    // Used to enqueue a message if the receiver is not ready to process it immediately.
+    // Used to enqueue a message if the receiver is not ready to process it.
     fn enqueue_message(&mut self, message: UeMessage) -> Result<()> {
+        let mut result = Ok(());
+
         // Check for messages that should abort the procedure immediately.
         match message {
-            UeMessage::TakeContext(sender) => {
-                self.give_context = Some(sender);
-                bail!("Take context")
+            UeMessage::TakeContext(_) => {
+                result = Err(anyhow!("Take context"));
+            }
+            UeMessage::Disconnect => {
+                result = Err(anyhow!("SCTP disconnection"));
             }
             UeMessage::F1ap(ref m) => {
                 if let F1apPdu::InitiatingMessage(
                     f1ap::InitiatingMessage::UeContextReleaseRequest(_),
                 ) = *m.as_ref()
                 {
-                    bail!("Context release request from DU - abort current procedure");
+                    result = Err(anyhow!("Context release request from DU"));
                 }
             }
             UeMessage::Ngap(ref m) => {
@@ -226,14 +236,20 @@ impl<A: ProcedureBase> UeMessageHandler<A> {
                     ngap::InitiatingMessage::UeContextReleaseRequest(_),
                 ) = *m.as_ref()
                 {
-                    bail!("Context release request from gNB - abort current procedure");
+                    result = Err(anyhow!("Context release request from gNB"));
                 }
             }
             _ => (),
         }
 
+        // In the case of an abort message, we clear the queue of all other messages so
+        // we immediately process the abort message in the next round of the dispatch loop.
+        if result.is_err() {
+            self.queue.clear();
+        }
+
         self.queue.push_back(message);
-        Ok(())
+        result
     }
 }
 
@@ -271,6 +287,7 @@ impl<A: ProcedureBase> RanUeBase for &mut UeMessageHandler<A> {
             ue_id: u32,
             logger: &Logger,
         ) -> [u8;4];
+        async fn delete_tmsi(&self, tmsi: [u8; 4]);
         async fn take_core_context(&self, tmsi: &[u8]) -> Option<UeContext5GC>;
     }}
 
@@ -301,7 +318,15 @@ impl<A: ProcedureBase> RanUeBase for &mut UeMessageHandler<A> {
         self.enqueue_message(pdu.into())
     }
 
-    fn disconnect_ue(&mut self) {
-        self.stop = true;
+    fn disconnect_ue(&mut self, cause: ReleaseCause) {
+        self.dispatch_status = DispatchStatus::Release;
+        self.release_cause = cause;
     }
+}
+
+enum DispatchStatus {
+    Continue,
+    Disconnected,
+    Release,
+    ReleaseAndGiveContext(Sender<UeContext5GC>),
 }

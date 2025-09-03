@@ -1,0 +1,14 @@
+[package]
+name = "load-test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.97"
+async-std = { version = "1.13.1", features = ["attributes"] }
+slog = "2.7.0"
+qcore-tests = { path = "../tests" }
+slog-term = "2.8.0"
+slog-envlogger = "2.2.0"
+clap = "4.5.46"
+slog-async = "2.8.0"

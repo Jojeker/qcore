@@ -1,13 +1,14 @@
 #![allow(clippy::unusual_byte_groupings)]
 use anyhow::Result;
+use nas::NasContext;
 use oxirush_nas::{
     Nas5gmmMessage, Nas5gmmMessageType, Nas5gsMessage, Nas5gsSecurityHeaderType, Nas5gsmMessage,
     Nas5gsmMessageType, NasAuthenticationFailureParameter, NasAuthenticationResponseParameter,
     NasDeRegistrationType, NasDnn, NasFGmmCause, NasFGsMobileIdentity, NasFGsRegistrationType,
     NasFGsmCapability, NasFGsmCause, NasIntegrityProtectionMaximumDataRate, NasKeySetIdentifier,
-    NasMessageContainer, NasPayloadContainer, NasPayloadContainerType, NasPduSessionStatus,
-    NasPduSessionType, NasSscMode, NasUeSecurityCapability, NasUplinkDataStatus,
-    encode_nas_5gs_message,
+    NasMessageContainer, NasPayloadContainer, NasPayloadContainerType, NasPduSessionIdentity2,
+    NasPduSessionStatus, NasPduSessionType, NasSscMode, NasUeSecurityCapability,
+    NasUplinkDataStatus, encode_nas_5gs_message,
     messages::{
         Nas5gmmHeader, Nas5gsmHeader, NasAuthenticationFailure, NasAuthenticationResponse,
         NasConfigurationUpdateComplete, NasDeregistrationRequestFromUe, NasIdentityResponse,
@@ -94,6 +95,7 @@ pub fn mobile_identity_stmsi(guti: &[u8; 10]) -> NasFGsMobileIdentity {
 
 pub fn guti_registration_request_with_inner_session_activation(
     fgs_mobile_identity: NasFGsMobileIdentity,
+    nas_ctxt: &mut NasContext,
 ) -> Result<Vec<u8>> {
     let inner = registration_request_inner(fgs_mobile_identity, true);
     let mut outer = inner.clone();
@@ -112,7 +114,7 @@ pub fn guti_registration_request_with_inner_session_activation(
     outer.pdu_session_status = None;
     outer.uplink_data_status = None;
 
-    let outer = Nas5gsMessage::Gmm(
+    let message = Nas5gsMessage::Gmm(
         Nas5gmmHeader {
             extended_protocol_discriminator: ExtendedProtocolDiscriminator::FIVEGMM,
             security_header_type: SecurityHeaderType::PLAIN_5GS_NAS_MESSAGE_NOT_SECURITY_PROTECTED,
@@ -120,9 +122,7 @@ pub fn guti_registration_request_with_inner_session_activation(
         },
         Nas5gmmMessage::RegistrationRequest(outer),
     );
-    let outer = Nas5gsMessage::protect(outer, Nas5gsSecurityHeaderType::IntegrityProtected, 0, 5);
-
-    Ok(encode_nas_5gs_message(&outer)?)
+    nas_ctxt.encode_ul_with_integrity(Box::new(message))
 }
 
 pub fn registration_request(
@@ -225,7 +225,10 @@ fn pdu_session_status() -> NasPduSessionStatus {
     NasPduSessionStatus::new(SESSION_AND_UPLINK_DATA_STATUS_FLAGS.to_vec())
 }
 
-pub fn service_request(fg_s_tmsi: NasFGsMobileIdentity) -> Result<Vec<u8>> {
+pub fn service_request(
+    fg_s_tmsi: NasFGsMobileIdentity,
+    nas_ctxt: &mut NasContext,
+) -> Result<Vec<u8>> {
     let ngksi = NasKeySetIdentifier::new(1); // TODO
     let inner_message = Nas5gmmMessage::ServiceRequest(NasServiceRequest {
         ngksi: ngksi.clone(),
@@ -258,7 +261,7 @@ pub fn service_request(fg_s_tmsi: NasFGsMobileIdentity) -> Result<Vec<u8>> {
         paging_restriction: None,
     });
 
-    let outer_message = Nas5gsMessage::Gmm(
+    let message = Nas5gsMessage::Gmm(
         Nas5gmmHeader {
             extended_protocol_discriminator: ExtendedProtocolDiscriminator::FIVEGMM,
             security_header_type: SecurityHeaderType::PLAIN_5GS_NAS_MESSAGE_NOT_SECURITY_PROTECTED,
@@ -267,18 +270,14 @@ pub fn service_request(fg_s_tmsi: NasFGsMobileIdentity) -> Result<Vec<u8>> {
         outer_message,
     );
 
-    let message = Nas5gsMessage::protect(
-        outer_message,
-        Nas5gsSecurityHeaderType::IntegrityProtected,
-        0,
-        5,
-    );
-    Ok(encode_nas_5gs_message(&message)?)
+    nas_ctxt.encode_ul_with_integrity(Box::new(message))
 }
 
-pub fn authentication_response() -> Result<Vec<u8>> {
+pub fn authentication_response(xres_star: &[u8; 16]) -> Result<Vec<u8>> {
     let message = Nas5gmmMessage::AuthenticationResponse(NasAuthenticationResponse {
-        authentication_response_parameter: Some(NasAuthenticationResponseParameter::new(vec![])),
+        authentication_response_parameter: Some(NasAuthenticationResponseParameter::new(
+            xres_star.to_vec(),
+        )),
         eap_message: None,
     });
 
@@ -331,7 +330,10 @@ pub fn identity_response(imsi: &str) -> Result<Vec<u8>> {
     Ok(encode_nas_5gs_message(&message)?)
 }
 
-pub fn security_mode_complete(register_request: Vec<u8>) -> Result<Vec<u8>> {
+pub fn security_mode_complete(
+    register_request: Vec<u8>,
+    nas_ctxt: &mut NasContext,
+) -> Result<Vec<u8>> {
     let message = Nas5gsMessage::Gmm(
         Nas5gmmHeader {
             extended_protocol_discriminator: ExtendedProtocolDiscriminator::FIVEGMM,
@@ -343,7 +345,7 @@ pub fn security_mode_complete(register_request: Vec<u8>) -> Result<Vec<u8>> {
             ..NasSecurityModeComplete::new()
         }),
     );
-    Ok(encode_nas_5gs_message(&message)?)
+    nas_ctxt.encode_ul_with_integrity(Box::new(message))
 }
 
 pub fn registration_complete() -> Result<Vec<u8>> {
@@ -358,7 +360,7 @@ pub fn registration_complete() -> Result<Vec<u8>> {
     Ok(encode_nas_5gs_message(&message)?)
 }
 
-pub fn configuration_update_complete() -> Result<Vec<u8>> {
+pub fn configuration_update_complete(nas_ctxt: &mut NasContext) -> Result<Vec<u8>> {
     let message = Nas5gsMessage::Gmm(
         Nas5gmmHeader {
             extended_protocol_discriminator: ExtendedProtocolDiscriminator::FIVEGMM,
@@ -367,10 +369,13 @@ pub fn configuration_update_complete() -> Result<Vec<u8>> {
         },
         Nas5gmmMessage::ConfigurationUpdateComplete(NasConfigurationUpdateComplete),
     );
-    Ok(encode_nas_5gs_message(&message)?)
+    nas_ctxt.encode_ul_with_integrity(Box::new(message))
 }
 
-pub fn pdu_session_establishment_request(dnn: Option<&[u8]>) -> Result<Vec<u8>> {
+pub fn pdu_session_establishment_request(
+    dnn: Option<&[u8]>,
+    nas_ctxt: &mut NasContext,
+) -> Result<Vec<u8>> {
     // See https://www.sharetechnote.com/html/5G/5G_PDUSessionEstablishment.html for an example.
     let inner_message = Nas5gsMessage::Gsm(
         Nas5gsmHeader {
@@ -415,14 +420,14 @@ pub fn pdu_session_establishment_request(dnn: Option<&[u8]>) -> Result<Vec<u8>> 
         ..wrap_in_ul_nas_transport(inner_message)
     };
 
-    let outer_message = Nas5gsMessage::new_5gmm(
+    let message = Nas5gsMessage::new_5gmm(
         Nas5gmmMessageType::UlNasTransport,
         Nas5gmmMessage::UlNasTransport(ul_nas_transport),
     );
-    Ok(encode_nas_5gs_message(&outer_message)?)
+    nas_ctxt.encode_ul_with_integrity(Box::new(message))
 }
 
-pub fn pdu_session_release_request() -> Result<Vec<u8>> {
+pub fn pdu_session_release_request(nas_ctxt: &mut NasContext) -> Result<Vec<u8>> {
     let inner_message = Nas5gsMessage::Gsm(
         Nas5gsmHeader {
             extended_protocol_discriminator: ExtendedProtocolDiscriminator::FIVEGSM,
@@ -437,14 +442,14 @@ pub fn pdu_session_release_request() -> Result<Vec<u8>> {
     );
     let inner_message = encode_nas_5gs_message(&inner_message)?;
     let ul_nas_transport = wrap_in_ul_nas_transport(inner_message);
-    let outer_message = Nas5gsMessage::new_5gmm(
+    let message = Nas5gsMessage::new_5gmm(
         Nas5gmmMessageType::UlNasTransport,
         Nas5gmmMessage::UlNasTransport(ul_nas_transport),
     );
-    Ok(encode_nas_5gs_message(&outer_message)?)
+    nas_ctxt.encode_ul_with_integrity(Box::new(message))
 }
 
-pub fn pdu_session_release_complete() -> Result<Vec<u8>> {
+pub fn pdu_session_release_complete(nas_ctxt: &mut NasContext) -> Result<Vec<u8>> {
     let inner_message = Nas5gsMessage::Gsm(
         Nas5gsmHeader {
             extended_protocol_discriminator: ExtendedProtocolDiscriminator::FIVEGSM,
@@ -459,18 +464,18 @@ pub fn pdu_session_release_complete() -> Result<Vec<u8>> {
     );
     let inner_message = encode_nas_5gs_message(&inner_message)?;
     let ul_nas_transport = wrap_in_ul_nas_transport(inner_message);
-    let outer_message = Nas5gsMessage::new_5gmm(
+    let message = Nas5gsMessage::new_5gmm(
         Nas5gmmMessageType::UlNasTransport,
         Nas5gmmMessage::UlNasTransport(ul_nas_transport),
     );
-    Ok(encode_nas_5gs_message(&outer_message)?)
+    nas_ctxt.encode_ul_with_integrity(Box::new(message))
 }
 
 fn wrap_in_ul_nas_transport(inner_message: Vec<u8>) -> NasUlNasTransport {
     NasUlNasTransport {
         payload_container_type: NasPayloadContainerType::new(0b0001), // 5GSM
         payload_container: NasPayloadContainer::new(inner_message),
-        pdu_session_id: None,
+        pdu_session_id: Some(NasPduSessionIdentity2::new(1)),
         old_pdu_session_id: None,
         request_type: None,
         s_nssai: None,
@@ -481,7 +486,7 @@ fn wrap_in_ul_nas_transport(inner_message: Vec<u8>) -> NasUlNasTransport {
     }
 }
 
-pub fn deregistration_request() -> Result<Vec<u8>> {
+pub fn deregistration_request(nas_ctxt: &mut NasContext) -> Result<Vec<u8>> {
     let dereg_type = 0b0001; // 3GPP normal dereg - TS24.501, table 9.11.3.20.1
     let guti_mobile_identity = vec![
         0b11110_010, // octet 4 , type of identity = 010 = GUTI
@@ -508,5 +513,5 @@ pub fn deregistration_request() -> Result<Vec<u8>> {
             NasFGsMobileIdentity::new(guti_mobile_identity),
         )),
     );
-    Ok(encode_nas_5gs_message(&message)?)
+    nas_ctxt.encode_ul_with_integrity(Box::new(message))
 }

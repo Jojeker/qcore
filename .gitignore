@@ -1,2 +1,4 @@
-/target
-/*.pcap
+**/target
+**/*.pcap
+**/*.log
+load_test_sims.toml
