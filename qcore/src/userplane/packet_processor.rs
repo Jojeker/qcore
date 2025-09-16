@@ -1,7 +1,7 @@
 #![allow(clippy::unusual_byte_groupings)]
-use super::stats::dump_stats;
-//use super::aya_log::EbpfLogger;
 use super::MAX_UES;
+//use super::aya_log::EbpfLogger;
+use super::stats::dump_stats;
 use crate::UserplaneSession;
 use crate::data::PdcpSequenceNumberLength;
 use anyhow::{Result, anyhow, bail, ensure};
@@ -170,10 +170,6 @@ impl PacketProcessor {
             session.five_qi,
         );
 
-        // TODO: Once we implement downlink buffering, could split this into a command that starts buffering downlink packets, and
-        // then a second one that flushes the buffer (after the RRC Reconfiguration Complete).  Otherwise, the UE could
-        // receive a packet before it has confirmed setup of the new DRB.
-
         let IpAddr::V4(ue_ipv4) = session.ue_ip_addr else {
             bail!("IPv6 not implemented for UE");
         };
@@ -197,11 +193,18 @@ impl PacketProcessor {
         let mut array = self.uplink_forwarding_table.lock().await;
         array.set(idx as u32, v, 0)?;
 
+        let remote_gtp_addr = u32::from_be_bytes(gtp_remote_ipv4.octets());
+        // TODO: broaden this to check for more invalid addresses.
+        ensure!(
+            remote_gtp_addr != 0xffffffff,
+            "All 1s address not allowed for remote GTP address"
+        );
+
         let v = DlForwardingEntry {
             next_pdcp_seq_num: 0,
             next_nr_seq_num: 0,
             teid: u32::from_be_bytes(remote_tunnel_info.gtp_teid.0),
-            remote_gtp_addr: u32::from_be_bytes(gtp_remote_ipv4.octets()),
+            remote_gtp_addr,
             pdcp_header_length,
         };
         let mut array = self.downlink_forwarding_table.lock().await;
@@ -220,7 +223,14 @@ impl PacketProcessor {
     // Currently the local TEID of the session is retained across de/reactivation.
     pub async fn deactivate_userplane_session(&self, session: &UserplaneSession, logger: &Logger) {
         let idx = session.uplink_gtp_teid.0[3] as u32;
-        self.clear_forwarding_entries(idx, logger).await;
+
+        let mut array = self.downlink_forwarding_table.lock().await;
+        if let Err(e) = array.set(idx, DlForwardingEntry::deactivated(), 0) {
+            warn!(
+                logger,
+                "Error deactivating downlink forwarding entry {} - {}", idx, e
+            )
+        }
         info!(logger, "Deactivated userplane session {}", session);
     }
 

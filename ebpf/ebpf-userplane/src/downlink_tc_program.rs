@@ -7,8 +7,8 @@ use aya_ebpf::helpers::r#gen::bpf_csum_diff;
 use aya_ebpf::macros::{classifier, map};
 use aya_ebpf::maps::Array;
 use aya_ebpf::programs::TcContext;
-use core::intrinsics::{atomic_cxchg, AtomicOrdering};
 //use aya_log_ebpf::info;
+use core::intrinsics::{atomic_cxchg, AtomicOrdering};
 use ebpf_common::CounterIndex::*;
 use ebpf_common::*;
 use network_types::{
@@ -49,6 +49,11 @@ fn try_tc_downlink_n3(ctx: TcContext) -> Result<i32, i32> {
         ensure!(teid != 0, DlDropUnknownUe);
         let remote_ip = (*entry).remote_gtp_addr;
         ensure!(remote_ip != 0, DlDropUnknownUe);
+
+        // Pass the packet up to the controller application if requested to do so.
+        if remote_ip == 0xffffffff {
+            return Ok(redirect_to_controller());
+        }
 
         push_common_outer_headers(
             &ctx,
