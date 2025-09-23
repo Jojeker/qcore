@@ -1,6 +1,6 @@
 use super::subscriber_db::SubscriberDb;
 use super::userplane::{DownlinkBufferController, PacketProcessor, PagingApi};
-use crate::data::UePagingInfo;
+use crate::data::{Ipv4SessionParams, Payload, UePagingInfo};
 use crate::f1ap::{F1AP_BIND_PORT, F1AP_SCTP_PPID};
 use crate::ngap::{NGAP_BIND_PORT, NGAP_SCTP_PPID};
 use crate::procedures::{F1apHandler, NgapHandler, UeMessage, UeMessageHandler};
@@ -8,6 +8,7 @@ use crate::protocols::nas::Tmsi;
 use crate::protocols::ngap::build::paging;
 use crate::{Config, ProcedureBase, Sqn, SubscriberAuthParams, UeContext5GC, UserplaneSession};
 use anyhow::{Result, anyhow, bail};
+use async_std::task::JoinHandle;
 use async_std::{
     channel::{self, Sender},
     sync::Mutex,
@@ -44,6 +45,8 @@ pub struct QCore {
     tmsis: Arc<Mutex<HashMap<[u8; 4], CoreContextLocator>>>,
     served_cells: ServedCellsMap,
     ngap_mode: bool,
+    shutting_down: Arc<Mutex<bool>>,
+    downlink_buffer_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 enum CoreContextLocator {
@@ -77,7 +80,7 @@ impl QCore {
         userplane_stats: bool,
     ) -> Result<ProgramHandle> {
         let local_ip = config.ip_addr;
-        let mut ebpf = PacketProcessor::install_ebpf(
+        let (mut ebpf, veths) = PacketProcessor::install_ebpf(
             ngap_mode,
             local_ip,
             &config.ran_interface_name,
@@ -92,7 +95,8 @@ impl QCore {
         info!(&logger, "Supported slice SST {}", config.sst);
 
         let packet_processor =
-            PacketProcessor::new(config.ue_subnet, &mut ebpf, userplane_stats, &logger).await?;
+            PacketProcessor::new(config.ue_subnet, &mut ebpf, userplane_stats, veths, &logger)
+                .await?;
 
         let mut qc =
             Box::new(Self::new(config, packet_processor, logger, sub_db, ngap_mode).await?);
@@ -120,6 +124,8 @@ impl QCore {
             tmsis: Arc::new(Mutex::new(HashMap::new())),
             served_cells: Arc::new(Mutex::new(HashMap::new())),
             ngap_mode,
+            shutting_down: Arc::new(Mutex::new(false)),
+            downlink_buffer_handle: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -156,14 +162,15 @@ impl QCore {
         };
 
         *self.server_handle.lock().await = Some(handle);
-
-        let _ = self.downlink_data_buffer.run(self.clone());
+        *self.downlink_buffer_handle.lock().await =
+            Some(self.downlink_data_buffer.run(self.clone()));
 
         Ok(())
     }
 
     pub async fn graceful_shutdown(&mut self) {
         info!(&self.logger, "Shutting down");
+        *self.shutting_down.lock().await = true;
         self.stack.reset().await;
         if let Some(h) = self.server_handle.lock().await.take() {
             h.graceful_shutdown().await;
@@ -397,9 +404,18 @@ impl ProcedureBase for QCore {
         <Stack as IndicationHandler<P>>::handle(&self.stack, *r, logger).await
     }
 
-    async fn allocate_userplane_session(&self, logger: &Logger) -> Result<UserplaneSession> {
+    async fn allocate_userplane_session(
+        &self,
+        ipv4: bool,
+        logger: &Logger,
+    ) -> Result<UserplaneSession> {
         self.packet_processor
-            .allocate_userplane_session(self.config().five_qi, self.config().pdcp_sn_length, logger)
+            .allocate_userplane_session(
+                self.config().five_qi,
+                self.config().pdcp_sn_length,
+                ipv4,
+                logger,
+            )
             .await
     }
 
@@ -413,9 +429,13 @@ impl ProcedureBase for QCore {
             .commit_userplane_session(session, logger)
             .await?;
 
-        self.downlink_data_buffer
-            .reactivate_ip(&session.ue_ip_addr)
-            .await
+        if let Payload::Ipv4(Ipv4SessionParams { ue_ip_addr }) = session.payload {
+            self.downlink_data_buffer
+                .reactivate_ip(&IpAddr::V4(ue_ip_addr))
+                .await
+        } else {
+            Ok(false)
+        }
     }
 
     async fn delete_userplane_session(&self, session: &UserplaneSession, logger: &Logger) {
@@ -430,19 +450,34 @@ impl ProcedureBase for QCore {
         paging_info: &UePagingInfo,
         logger: &Logger,
     ) {
+        if *self.shutting_down.lock().await {
+            debug!(
+                logger,
+                "Skipping userplane session deactivation during shutdown"
+            );
+            return;
+        }
+
         self.packet_processor
             .deactivate_userplane_session(session, logger)
             .await;
 
-        debug!(
-            logger,
-            "Arm downlink packet detection for IP {}, will page {}",
-            session.ue_ip_addr,
-            Tmsi(paging_info.tmsi)
-        );
+        if let Payload::Ipv4(Ipv4SessionParams { ue_ip_addr }) = session.payload {
+            debug!(
+                logger,
+                "Arm downlink packet detection for IP {}, will page {}",
+                ue_ip_addr,
+                Tmsi(paging_info.tmsi)
+            );
 
-        self.downlink_data_buffer
-            .deactivate_ip(&session.ue_ip_addr, paging_info)
-            .await
+            self.downlink_data_buffer
+                .deactivate_ip(&IpAddr::V4(ue_ip_addr), paging_info)
+                .await
+        } else {
+            warn!(
+                logger,
+                "Ethernet session downlink buffering not yet implemented"
+            );
+        }
     }
 }

@@ -97,7 +97,7 @@ impl<A: ProcedureBase> UeMessageHandler<A> {
         };
         for session in ue.core.pdu_sessions.iter() {
             self.api
-                .deactivate_userplane_session(&session.userplane_info, &paging_info, &self.logger)
+                .deactivate_userplane_session(&session.userplane, &paging_info, &self.logger)
                 .await;
         }
     }
@@ -267,7 +267,7 @@ impl<A: ProcedureBase> RanUeBase for &mut UeMessageHandler<A> {
         to self.api {
             fn config(&self) -> &crate::Config;
             fn served_cells(&self) -> &ServedCellsMap;
-            async fn allocate_userplane_session(&self, logger: &Logger) -> Result<UserplaneSession>;
+            async fn allocate_userplane_session(&self, ipv4: bool, logger: &Logger) -> Result<UserplaneSession>;
         async fn xxap_request<P: xxap::Procedure>(
             &self,
             r: Box<P::Request>,

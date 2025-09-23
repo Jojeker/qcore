@@ -1822,6 +1822,7 @@ dependencies = [
  "ngap",
  "oxirush-nas",
  "pdcp",
+ "pnet_base",
  "pnet_packet",
  "qcore",
  "rand 0.8.5",

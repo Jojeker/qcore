@@ -4,12 +4,17 @@
 #![feature(core_intrinsics)]
 
 mod headers;
-mod utils;
 #[macro_use]
+mod tc_utils;
+#[macro_use]
+mod xdp_utils;
 mod counters;
 mod downlink_tc_program;
+mod downlink_xdp_program;
 mod globals;
+mod maps;
 mod uplink_tc_program;
+mod uplink_xdp_program;
 
 #[cfg(not(test))]
 #[panic_handler]

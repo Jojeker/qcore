@@ -1,0 +1,12 @@
+#!/bin/sh
+NUMBER_OF_DEVICES=${1:-2}
+BRIDGE_NAME="qcore_br0"
+sudo ip link add $BRIDGE_NAME type bridge
+for i in $(seq 1 $((NUMBER_OF_DEVICES))); do
+    sudo ip link add veth_ue_${i}_a type veth peer veth_ue_${i}_b
+    sudo ip link set veth_ue_${i}_b master $BRIDGE_NAME
+    sudo ip link set veth_ue_${i}_a up
+    sudo ip link set veth_ue_${i}_b up
+    echo "Set up veth_ue_${i}_a and veth_ue_${i}_b (b side connected to $BRIDGE_NAME)"
+done
+sudo ip link set $BRIDGE_NAME up

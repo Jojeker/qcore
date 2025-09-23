@@ -96,9 +96,9 @@ impl<'a, B: RanUeBase> NgapUeProcedure<'a, B> {
                 .dl_qos_flow_per_tnl_information
                 .up_transport_layer_information;
 
-        session.userplane_info.remote_tunnel_info = Some(gtp_tunnel);
+        session.userplane.remote_tunnel_info = Some(gtp_tunnel);
         self.api
-            .commit_userplane_session(&session.userplane_info, &self.logger)
+            .commit_userplane_session(&session.userplane, &self.logger)
             .await
     }
 }
@@ -114,7 +114,7 @@ impl<'a, B: RanUeBase> NasBase for &mut NgapUeProcedure<'a, B> {
             async fn take_core_context(&self, tmsi: &[u8]) -> Option<UeContext5GC>;
             #[call(unexpected_pdu)]
             fn unexpected_nas_pdu(&mut self, pdu: DecodedNas, expected: &str) -> Result<()>;
-            async fn allocate_userplane_session(&self, [&self.logger]) -> Result<UserplaneSession>;
+            async fn allocate_userplane_session(&self, ipv4: bool, [&self.logger]) -> Result<UserplaneSession>;
             async fn delete_userplane_session(
                 &self,
                 session: &UserplaneSession,

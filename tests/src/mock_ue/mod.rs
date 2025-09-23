@@ -1,21 +1,24 @@
 mod mock_ue_5gc;
 pub use mock_ue_5gc::*;
-
+mod builder;
 use anyhow::{Result, anyhow, bail, ensure};
 use async_trait::async_trait;
+pub use builder::UeBuilder;
 use oxirush_nas::{
     Nas5gmmMessage, Nas5gsMessage, Nas5gsmMessage, NasPduAddress, NasPduSessionReactivationResult,
     NasPduSessionStatus, NasPduSessionType, decode_nas_5gs_message,
     messages::{
         NasAuthenticationRequest, NasDlNasTransport, NasPduSessionEstablishmentAccept,
-        NasPduSessionReleaseCommand,
+        NasPduSessionEstablishmentReject, NasPduSessionReleaseCommand,
     },
 };
+use pnet_base::MacAddr;
 use qcore::SubscriberAuthParams;
 use slog::{Logger, info, o};
 use std::net::Ipv4Addr;
 
 pub use crate::mock_ue::build_nas::{NGKSI_IN_USE, SYNCH_FAILURE};
+use crate::packet::Packet;
 
 // TODO: commonize with QCore
 #[macro_export]
@@ -44,13 +47,7 @@ pub trait Transport {
         logger: &Logger,
     ) -> Result<()>;
     async fn receive_nas(&mut self, logger: &Logger) -> Result<Vec<u8>>;
-    async fn send_userplane_packet(
-        &self,
-        src_ip: &Ipv4Addr,
-        dst_ip: &Ipv4Addr,
-        src_port: u16,
-        dst_port: u16,
-    ) -> Result<()>;
+    async fn send_userplane_packet(&self, packet: Packet) -> Result<()>;
     async fn receive_userplane_packet(&self) -> Result<Vec<u8>>;
 }
 
@@ -59,6 +56,7 @@ pub struct MockUe<T: Transport> {
     transport: T,
     logger: Logger,
     use_wrong_imsi: bool,
+    use_ethernet: bool,
 }
 
 impl<T: Transport> MockUe<T> {
@@ -74,6 +72,7 @@ impl<T: Transport> MockUe<T> {
             transport,
             logger: logger.new(o!("ue" => ue_id)),
             use_wrong_imsi: false,
+            use_ethernet: false,
         }
     }
 
@@ -83,6 +82,7 @@ impl<T: Transport> MockUe<T> {
             transport,
             logger: logger.new(o!("ue" => ue_id)),
             use_wrong_imsi: false,
+            use_ethernet: false,
         }
     }
 
@@ -104,6 +104,10 @@ impl<T: Transport> MockUe<T> {
 
     pub fn use_dnn(&mut self, dnn: &'static [u8]) {
         self.data.dnn = Some(dnn);
+    }
+
+    pub fn use_ethernet(&mut self) {
+        self.use_ethernet = true;
     }
 
     async fn send_nas(&mut self, nas_bytes: Vec<u8>) -> Result<()> {
@@ -325,6 +329,7 @@ impl<T: Transport> MockUe<T> {
         let nas_session_establishment_request = build_nas::pdu_session_establishment_request(
             self.data.dnn,
             &mut self.data.nas_context,
+            self.use_ethernet,
         )?;
         info!(&self.logger, "Nas PduSessionEstablishmentRequest >>");
         self.send_nas(nas_session_establishment_request).await
@@ -360,15 +365,28 @@ impl<T: Transport> MockUe<T> {
         self.send_nas(nas_bytes).await
     }
 
-    pub async fn send_userplane_packet(
+    pub async fn send_userplane_udp(
         &self,
         dst_ip: &Ipv4Addr,
         src_port: u16,
         dst_port: u16,
     ) -> Result<()> {
-        self.transport
-            .send_userplane_packet(&self.data.ipv4_addr, dst_ip, src_port, dst_port)
-            .await
+        let packet = Packet::new_ue_udp(&self.data.ipv4_addr, dst_ip, src_port, dst_port);
+        self.transport.send_userplane_packet(packet).await
+    }
+
+    pub async fn send_userplane_ethernet_broadcast(&self) -> Result<()> {
+        let packet = Packet::new_ue_ethernet_broadcast();
+        self.transport.send_userplane_packet(packet).await
+    }
+
+    pub async fn send_userplane_ethernet_unicast(
+        &self,
+        src: &MacAddr,
+        dst: &MacAddr,
+    ) -> Result<()> {
+        let packet = Packet::new_ue_ethernet_unicast(src, dst);
+        self.transport.send_userplane_packet(packet).await
     }
 
     pub async fn recv_ue_data_packet(&self) -> Result<Vec<u8>> {
@@ -396,27 +414,57 @@ impl<T: Transport> MockUe<T> {
     pub async fn receive_nas_session_accept(&mut self) -> Result<()> {
         let nas = self.receive_nas().await?;
         let message = decode_security_protected_sm(nas)?;
+
         let Nas5gsmMessage::PduSessionEstablishmentAccept(NasPduSessionEstablishmentAccept {
-            selected_pdu_session_type: NasPduSessionType { value: 1, .. },
-            pdu_address:
-                Some(NasPduAddress {
-                    value: nas_pdu_address_ie,
+            selected_pdu_session_type:
+                NasPduSessionType {
+                    value: selected_session_type,
                     ..
-                }),
+                },
+            pdu_address,
             ..
         }) = message
         else {
             bail!("Expected NasPduSessionEstablishmentAccept, got {message:?}");
         };
 
+        if self.use_ethernet {
+            assert_eq!(selected_session_type, 0b101);
+            assert_eq!(pdu_address, None);
+        } else {
+            let Some(NasPduAddress {
+                value: nas_pdu_address_ie,
+                ..
+            }) = pdu_address
+            else {
+                bail!("Expected NasPduAddress in PduSessionEstablishmentAccept for IPv4 sessions");
+            };
+            self.data.ipv4_addr = Ipv4Addr::new(
+                nas_pdu_address_ie[1],
+                nas_pdu_address_ie[2],
+                nas_pdu_address_ie[3],
+                nas_pdu_address_ie[4],
+            );
+        }
+
         info!(&self.logger, "Nas PduSessionEstablishmentAccept <<");
 
-        self.data.ipv4_addr = Ipv4Addr::new(
-            nas_pdu_address_ie[1],
-            nas_pdu_address_ie[2],
-            nas_pdu_address_ie[3],
-            nas_pdu_address_ie[4],
-        );
+        Ok(())
+    }
+
+    pub async fn receive_nas_session_reject(&mut self) -> Result<()> {
+        let nas = self.receive_nas().await?;
+        let message = decode_security_protected_sm(nas)?;
+
+        let Nas5gsmMessage::PduSessionEstablishmentReject(NasPduSessionEstablishmentReject {
+            ..
+        }) = message
+        else {
+            bail!("Expected NasPduSessionEstablishmentReject, got {message:?}");
+        };
+
+        info!(&self.logger, "Nas PduSessionEstablishmentReject <<");
+
         Ok(())
     }
 

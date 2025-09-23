@@ -1,6 +1,9 @@
 #![allow(clippy::unusual_byte_groupings)]
-use crate::PduSession;
-use anyhow::{Result, bail};
+use crate::{
+    PduSession,
+    data::{Ipv4SessionParams, Payload},
+};
+use anyhow::Result;
 use oxirush_nas::{
     Nas5gmmMessage, Nas5gmmMessageType, Nas5gsMessage, Nas5gsmMessage, Nas5gsmMessageType, NasAbba,
     NasAdditionalFGSecurityInformation, NasAuthenticationParameterAutn,
@@ -15,12 +18,11 @@ use oxirush_nas::{
     messages::{
         NasAuthenticationRequest, NasConfigurationUpdateCommand, NasDeregistrationAcceptFromUe,
         NasDlNasTransport, NasFGmmStatus, NasIdentityRequest, NasPduSessionEstablishmentAccept,
-        NasPduSessionReleaseCommand, NasRegistrationAccept, NasRegistrationReject,
-        NasSecurityModeCommand, NasServiceAccept, NasServiceReject,
+        NasPduSessionEstablishmentReject, NasPduSessionReleaseCommand, NasRegistrationAccept,
+        NasRegistrationReject, NasSecurityModeCommand, NasServiceAccept, NasServiceReject,
     },
 };
 use security::NAS_ABBA;
-use std::net::IpAddr;
 use xxap::PlmnIdentity;
 
 use super::AmfIds;
@@ -250,15 +252,27 @@ pub fn pdu_session_establishment_accept(
     pti: u8,
     sst: u8,
 ) -> Result<Box<Nas5gsMessage>> {
-    let ue_ip_addr = pdu_session.userplane_info.ue_ip_addr;
-    let IpAddr::V4(ue_ipv4) = ue_ip_addr else {
-        bail!("IPv6 not implemented")
-    };
-
-    let five_qi = pdu_session.userplane_info.five_qi;
-    let qfi = pdu_session.userplane_info.qfi;
+    let five_qi = pdu_session.userplane.five_qi;
+    let qfi = pdu_session.userplane.qfi;
     let dns_primary = &[0x08, 0x08, 0x08, 0x08];
     let dns_secondary = &[0x08, 0x08, 0x04, 0x04];
+
+    let pdu_address;
+    let selected_session_type;
+    let extended_protocol_configuration_options;
+    match pdu_session.userplane.payload {
+        Payload::Ipv4(Ipv4SessionParams { ue_ip_addr }) => {
+            pdu_address = Some(nas_pdu_address(&ue_ip_addr.octets()));
+            selected_session_type = 0b001;
+            extended_protocol_configuration_options =
+                Some(extended_pco(dns_primary, dns_secondary, true));
+        }
+        Payload::Ethernet { .. } => {
+            selected_session_type = 0b101;
+            pdu_address = None;
+            extended_protocol_configuration_options = None;
+        }
+    }
 
     // Work around limitation in NAS library.  SSC Mode and Selected Session Type are
     // half byte V fields (24.501, table 8.3.2.1.1).  NasPduSessionType wrongly includes
@@ -266,7 +280,7 @@ pub fn pdu_session_establishment_accept(
     // the value field we can get the right behaviour by putting the SSC mode in the type field.
     let ssc_mode_and_selected_session_type = NasPduSessionType {
         type_field: 0b0001_0000, // SSC mode 1
-        value: 0b0000_0001,      // session type IPv4
+        value: selected_session_type,
     };
 
     let inner_message = Nas5gsMessage::new_5gsm(
@@ -276,18 +290,14 @@ pub fn pdu_session_establishment_accept(
             authorized_qos_rules: authorized_qos_rules(qfi),
             session_ambr: session_ambr(),
             fgsm_cause: None,
-            pdu_address: Some(nas_pdu_address(&ue_ipv4.octets())),
+            pdu_address,
             rq_timer_value: None,
             s_nssai: Some(snssai(sst)),
             always_on_pdu_session_indication: None,
             mapped_eps_bearer_contexts: None,
             eap_message: None,
             authorized_qos_flow_descriptions: Some(authorized_qos_flow_descriptions(qfi, five_qi)),
-            extended_protocol_configuration_options: Some(extended_protocol_configuration_options(
-                dns_primary,
-                dns_secondary,
-                true,
-            )),
+            extended_protocol_configuration_options,
             dnn: Some(nas_dnn(&pdu_session.dnn)),
             fgsm_network_feature_support: None,
             serving_plmn_rate_control: None,
@@ -302,6 +312,29 @@ pub fn pdu_session_establishment_accept(
         pti,
     );
     wrap_in_dl_nas_transport(pdu_session.id, &inner_message)
+}
+
+pub fn pdu_session_establishment_reject(
+    session_id: u8,
+    pti: u8,
+    cause: u8,
+) -> Result<Box<Nas5gsMessage>> {
+    let inner_message = Nas5gsMessage::new_5gsm(
+        Nas5gsmMessageType::PduSessionEstablishmentReject,
+        Nas5gsmMessage::PduSessionEstablishmentReject(NasPduSessionEstablishmentReject {
+            fgsm_cause: NasFGsmCause::new(cause),
+            back_off_timer_value: None,
+            allowed_ssc_mode: None,
+            eap_message: None,
+            fgsm_congestion_re_attempt_indicator: None,
+            extended_protocol_configuration_options: None,
+            re_attempt_indicator: None,
+            service_level_aa_container: None,
+        }),
+        session_id,
+        pti,
+    );
+    wrap_in_dl_nas_transport(session_id, &inner_message)
 }
 
 pub fn pdu_session_release_command(
@@ -344,7 +377,7 @@ fn wrap_in_dl_nas_transport(
     )))
 }
 
-fn extended_protocol_configuration_options(
+fn extended_pco(
     dns_primary: &[u8; 4],
     dns_secondary: &[u8; 4],
     include_ppp_ip_configuration_ack: bool,

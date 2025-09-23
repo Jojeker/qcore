@@ -17,9 +17,13 @@ Look for kfree_skb_reason().
 tcpdump -i tun
 ```
 
-## Kernel code read
-ip_route_input_slow() + fib_validate_source() drop packets with non specific SKB reasons.  Need to 
-read the Linux source code here.
+## Kernel source code
+-  Code read is typically needed if `pwru` isn't self-explanatory (via the SKB drop reason or call stack). 
+
+-  Browse source: https://elixir.bootlin.com/linux/v6.6.87/source.  Particularly https://elixir.bootlin.com/linux/v6.6.87/source/net/core/filter.c.
+
+- `dmesg` to check if warnings / BUG_ON were hit.
+
 
 ## sysctls
 There are sysctls that make Linux routing much more permissive.  Many of these are set in `setup-routing`.
@@ -66,3 +70,8 @@ tail -f /tmp/gnb.log | grep [E]
    -  wrong sequence number
    -  wrong PDU length
 - wrong TCP checksum cause by TCP checksum offload
+
+# BPF issues
+
+- https://fedepaol.github.io/blog/2023/09/11/xdp-ate-my-packets-and-how-i-debugged-it/
+- Inserting an info!() after an is_long_enough() check and before the packet access can mess up the registers and break verification.

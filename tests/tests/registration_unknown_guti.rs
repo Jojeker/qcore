@@ -1,10 +1,9 @@
-use qcore_tests::{MockUeF1ap, framework::*};
+use qcore_tests::framework::*;
 
 #[async_std::test]
 async fn registration_unknown_guti() -> anyhow::Result<()> {
-    let (mut du, qc, _dn, sims, logger) = init_f1ap().await?;
-    du.perform_f1_setup(qc.ip_addr()).await?;
-    let mut ue = MockUeF1ap::new(nth_imsi(0, &sims), 1, &du, qc.ip_addr(), &logger).await?;
+    let (du, _qc, _dn, builder, _logger) = init_f1ap().await?;
+    let mut ue = builder.f1ap_ue(&du).build().await?;
 
     // Send in an integrity protected GUTI registration on an RRC Setup Complete with a matching PLMN but
     // unknown GUTI.  (In this case, bad AMF ID 5,5,5.)
@@ -27,7 +26,5 @@ async fn registration_unknown_guti() -> anyhow::Result<()> {
     ue.perform_rrc_setup().await?;
     ue.use_wrong_imsi();
     ue.handle_identity_procedure().await?;
-    ue.receive_nas_registration_reject().await?;
-
-    Ok(())
+    ue.receive_nas_registration_reject().await
 }
