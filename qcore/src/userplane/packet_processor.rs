@@ -3,30 +3,31 @@ use super::MAX_UES;
 //use super::aya_log::EbpfLogger;
 use super::stats::dump_stats;
 use crate::UserplaneSession;
-use crate::data::{EthernetSesssionParams, Ipv4SessionParams, Payload, PdcpSequenceNumberLength};
-use anyhow::{Result, anyhow, bail, ensure};
+use crate::data::{
+    EthernetSesssionParams, Ipv4SessionParams, Payload, PdcpSequenceNumberLength,
+    UeIpAllocationConfig,
+};
+use crate::userplane::get_if_index;
+use crate::userplane::ue_ip_allocator::UeIpAllocator;
+use anyhow::{Result, bail, ensure};
 use async_std::{net::IpAddr, sync::Mutex};
 use aya::maps::{Array, MapData, PerCpuArray};
 use aya::programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags, tc};
 use aya::{Ebpf, EbpfLoader};
 use ebpf_common::*;
 use index_pool::IndexPool;
-use libc::if_nametoindex;
 use rand::RngCore;
 use slog::{Logger, info, warn};
-use std::ffi::CString;
-use std::net::Ipv4Addr;
 use std::sync::Arc;
 use xxap::GtpTeid;
 
 #[derive(Clone)]
 pub struct PacketProcessor {
     index_pool: Arc<Mutex<IndexPool>>,
-    ue_subnet: Ipv4Addr,
     uplink_forwarding_table: Arc<Mutex<UplinkForwardingTable>>,
     downlink_forwarding_table: Arc<Mutex<DownlinkForwardingTable>>,
     eth_if_index_lookup_table: Arc<Mutex<EthIndexLookupTable>>,
-    //tuns: Arc<Vec<Tun>>,
+    pub ue_ip_allocator: UeIpAllocator,
 
     // This is a list of available ethernet interface indices for ethernet
     // PDU sessions.  When an ethernet session is allocated, we pop an
@@ -37,9 +38,6 @@ pub struct PacketProcessor {
 type UplinkForwardingTable = Array<MapData, UlForwardingEntry>;
 type DownlinkForwardingTable = Array<MapData, DlForwardingEntry>;
 type EthIndexLookupTable = Array<MapData, u16>;
-
-// // First the if index we will use for transmitting from this UE, then the if index we will
-// // use to detect downlink packets to this UE.
 type InterfaceIndices = Vec<u32>;
 
 impl PacketProcessor {
@@ -154,7 +152,7 @@ impl PacketProcessor {
     }
 
     pub async fn new(
-        ue_subnet: Ipv4Addr,
+        ue_ip_allocation_config: UeIpAllocationConfig,
         ebpf: &mut Ebpf,
         userplane_stats: bool,
         if_indices: InterfaceIndices,
@@ -177,13 +175,18 @@ impl PacketProcessor {
             let _stats_task = async_std::task::spawn(dump_stats(logger.clone(), counters));
         }
 
+        // TODO: don't hardcode name
+        let ue_network_if_index = get_if_index("veth0")?;
+        let ue_ip_allocator =
+            UeIpAllocator::new(ue_network_if_index, ue_ip_allocation_config, logger).await?;
+
         Ok(PacketProcessor {
             index_pool,
-            ue_subnet,
             uplink_forwarding_table: Arc::new(Mutex::new(ul_forwarding_table)),
             downlink_forwarding_table: Arc::new(Mutex::new(dl_forwarding_table)),
             eth_if_index_lookup_table: Arc::new(Mutex::new(eth_index_lookup_table)),
             ethernet_interface_indices: Arc::new(Mutex::new(if_indices)),
+            ue_ip_allocator,
         })
     }
 
@@ -194,29 +197,27 @@ impl PacketProcessor {
         five_qi: u8,
         pdcp_sn_length: PdcpSequenceNumberLength,
         ipv4: bool,
-        _logger: &Logger,
+        ue_dhcp_identifier: Vec<u8>,
+        logger: &Logger,
     ) -> Result<UserplaneSession> {
+        // Allocate a UE index
         let idx = self.index_pool.lock().await.new_id();
         ensure!(idx < MAX_UES, "No more slots available");
         let idx = idx as u8;
 
-        // Randomize the top part of the TEID.  It is meant to be unpredictable.
+        // Create a TEID - randomized, since it is meant to be unpredictable.
         let mut teid = (idx as u32).to_be_bytes();
         rand::rng().fill_bytes(&mut teid[0..3]);
         teid[3] = idx as u8;
 
         let payload = if ipv4 {
-            // IPv4 PDU session
+            // Get an IP address for the UE
+            let ue_ip_addr = self
+                .ue_ip_allocator
+                .allocate(idx, ue_dhcp_identifier, logger)
+                .await?;
 
-            // Generate a UE IP.  We currently hardcode assumptions of 1 PDU session
-            // per UE, and max 253 UEs.
-            let mut ue_addr_octets = self.ue_subnet.octets();
-            ue_addr_octets[3] = idx;
-            let ue_ipv4_addr = Ipv4Addr::from(ue_addr_octets);
-
-            Payload::Ipv4(Ipv4SessionParams {
-                ue_ip_addr: ue_ipv4_addr,
-            })
+            Payload::Ipv4(Ipv4SessionParams { ue_ip_addr })
         } else {
             // Allocate a spare Ethernet interface.
             let Some(if_index) = self.ethernet_interface_indices.lock().await.pop() else {
@@ -240,10 +241,9 @@ impl PacketProcessor {
         session: &UserplaneSession,
         logger: &Logger,
     ) -> Result<()> {
-        let remote_tunnel_info = session
-            .remote_tunnel_info
-            .clone()
-            .ok_or(anyhow!("Missing tunnel info"))?;
+        let Some(remote_tunnel_info) = session.remote_tunnel_info.clone() else {
+            bail!("Missing tunnel info");
+        };
 
         info!(
             logger,
@@ -255,14 +255,6 @@ impl PacketProcessor {
             session.five_qi,
         );
 
-        let gtp_remote_ip: IpAddr = remote_tunnel_info.transport_layer_address.try_into()?;
-        let IpAddr::V4(gtp_remote_ipv4) = gtp_remote_ip else {
-            bail!("IPv6 not implemented for GTP");
-        };
-
-        // The least significant byte of the TEID is the forwarding table index.
-        let forwarding_idx = session.uplink_gtp_teid.0[3];
-
         let pdcp_header_length = match session.pdcp_sn_length {
             PdcpSequenceNumberLength::TwelveBits => 2,
             PdcpSequenceNumberLength::EighteenBits => 3,
@@ -273,14 +265,34 @@ impl PacketProcessor {
             _ => 0,
         };
 
+        // Program the uplink pipeline.
+
+        // We use the least significant byte of the TEID as the uplink forwarding table index.
+        let uplink_forwarding_idx = session.uplink_gtp_teid.0[3];
+
         let v = UlForwardingEntry {
             teid_top_bytes: session.uplink_gtp_teid.0[0..3].try_into().unwrap(),
             pdcp_header_length,
             egress_if_index: eth_if_idx,
         };
         let mut array = self.uplink_forwarding_table.lock().await;
-        array.set(forwarding_idx as u32, v, 0)?;
+        array.set(uplink_forwarding_idx as u32, v, 0)?;
 
+        // Program the downlink pipeline.
+
+        // For IP, we use the low byte of the IP address as the index.  Otherwise we will indirect
+        // via the ethernet if index lookup and we can just reuse the uplink idx.
+        let downlink_forwarding_idx =
+            if let Payload::Ipv4(Ipv4SessionParams { ue_ip_addr }) = session.payload {
+                ue_ip_addr.octets()[3]
+            } else {
+                uplink_forwarding_idx
+            };
+
+        let gtp_remote_ip: IpAddr = remote_tunnel_info.transport_layer_address.try_into()?;
+        let IpAddr::V4(gtp_remote_ipv4) = gtp_remote_ip else {
+            bail!("IPv6 not implemented for GTP");
+        };
         let remote_gtp_addr = u32::from_be_bytes(gtp_remote_ipv4.octets());
         // TODO: broaden this to check for more invalid addresses.
         ensure!(
@@ -296,17 +308,17 @@ impl PacketProcessor {
             pdcp_header_length,
         };
         let mut array = self.downlink_forwarding_table.lock().await;
-        if let Err(e) = array.set(forwarding_idx as u32, v, 0) {
+        if let Err(e) = array.set(downlink_forwarding_idx as u32, v, 0) {
             warn!(
                 logger,
-                "Failed to set downlink forwarding {} - {}", forwarding_idx, e
+                "Failed to set downlink forwarding {} - {}", downlink_forwarding_idx, e
             )
         }
 
         // For an Ethernet PDU session, set up the interface lookup table to point to the forwarding table entry.
         if eth_if_idx != 0 {
             let mut array = self.eth_if_index_lookup_table.lock().await;
-            if let Err(e) = array.set(eth_if_idx, forwarding_idx as u16, 0) {
+            if let Err(e) = array.set(eth_if_idx, downlink_forwarding_idx as u16, 0) {
                 warn!(logger, "Failed to set eth lookup {} - {}", eth_if_idx, e)
             }
         }
@@ -316,7 +328,7 @@ impl PacketProcessor {
 
     // Deactivating the userplane session returns it to the reserved state.  It can be
     // reactivated by calling commit_userplane_session().
-    // Currently the local TEID of the session is retained across de/reactivation.
+    // Currently, the local TEID of the session is retained across de/reactivation.
     pub async fn deactivate_userplane_session(&self, session: &UserplaneSession, logger: &Logger) {
         let idx = session.uplink_gtp_teid.0[3] as u32;
 
@@ -343,7 +355,9 @@ impl PacketProcessor {
                 // Return the ethernet interface index to the pool of available indices.
                 self.ethernet_interface_indices.lock().await.push(if_index);
             }
-            Payload::Ipv4(_) => {}
+            Payload::Ipv4(Ipv4SessionParams { ue_ip_addr }) => {
+                self.ue_ip_allocator.release(ue_ip_addr, logger).await
+            }
         }
 
         if let Err(e) = self.index_pool.lock().await.return_id(idx as usize) {
@@ -368,17 +382,4 @@ impl PacketProcessor {
             )
         }
     }
-}
-
-fn get_if_index(interface_name: &str) -> Result<u32> {
-    let c_str_if_name = CString::new(interface_name)?;
-    let c_if_name = c_str_if_name.as_ptr();
-    let if_index = unsafe { if_nametoindex(c_if_name) };
-    if if_index == 0 {
-        bail!(
-            "Interface {} does not exist - did you run the setup-routing script?",
-            interface_name
-        )
-    }
-    Ok(if_index)
 }

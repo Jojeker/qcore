@@ -1,6 +1,14 @@
 # Backlog
 
 ## In progress
+-  UEs on LAN
+   -  self-review / todos
+-  Clustering
+-  Is this a better design model for test UEs?: https://docs.rs/rtnetlink/latest/rtnetlink/struct.RouteMessageBuilder.html
+
+## Persistence
+- Paging continuity
+- SQN
 
 ## Bugs / tech debt
 - "slog-async: logger dropped messages due to channel overflow" - for example, when hitting Ctrl-C at end of PacketRusher test - check out tracing-appender
@@ -11,17 +19,18 @@
 - push to 1000 UEs
 - Reduce memcpy?
 
-## Persistence
-- Paging continuity
-- SQN
-
 ## Usability
 - Reduce number of mandatory command line arguments (e.g. derive IP address from interface, derive MNC/MCC from sims.toml)
+- flip use-dhcp default?
 
 ## Function gaps
 - Implement and test NAS procedure interaction table
 - Registration timeout and refresh (+ update parallelization table)
-- Proper handling of deregistration from UE, including sending of Deregistration accept (+ update parallelization table)
+- DHCP gaps
+  -  retries
+  -  PDU session should be terminated by network on lease expiry, or lease renewal reject, or change of address on lease renewal (TS29.561)
+  -  case where the subnet is not a /24 and the DHCP could allocate addresses with the same low byte
+  -  pass through of DNS server name (+ MTU?) from DHCP in NAS extended PCOs 
 - Ethernet paging
 - Sessions / IP addresses should not persist forever.  Timeout; flush on TMSI register/service request without session reactivation; flush on IMSI registration? 
 - Large SCTP messages - e.g. unfiltered UE Capability Information
@@ -57,7 +66,7 @@
 - Session setup with existing PDU session ID should not leave up old session.  Seen with OnePlus phone which repeated 
   its session setup request (with no intervening delete) after not liking the response.
 
-## Tidying + refactoring
+## Code cleanliness + refactoring
 - switch to tokio or smol
 - commonize downlink xdp and tc, or reimplement downlink tc logic in a new xdp program
 - review Arc / clone usage

@@ -94,9 +94,14 @@ impl QCore {
         );
         info!(&logger, "Supported slice SST {}", config.sst);
 
-        let packet_processor =
-            PacketProcessor::new(config.ue_subnet, &mut ebpf, userplane_stats, veths, &logger)
-                .await?;
+        let packet_processor = PacketProcessor::new(
+            config.ip_allocation_method.clone(),
+            &mut ebpf,
+            userplane_stats,
+            veths,
+            &logger,
+        )
+        .await?;
 
         let mut qc =
             Box::new(Self::new(config, packet_processor, logger, sub_db, ngap_mode).await?);
@@ -223,6 +228,17 @@ impl QCore {
             }
             _ => {}
         }
+    }
+    pub async fn test_dhcp(&self) -> Result<()> {
+        debug!(self.logger, "------ DHCP SELF TEST");
+        self.packet_processor
+            .ue_ip_allocator
+            .dhcp_self_test(&self.logger)
+            .await?;
+
+        info!(self.logger, "DHCP self test Ok");
+
+        Ok(())
     }
 }
 
@@ -407,6 +423,7 @@ impl ProcedureBase for QCore {
     async fn allocate_userplane_session(
         &self,
         ipv4: bool,
+        ue_dhcp_identifier: Vec<u8>,
         logger: &Logger,
     ) -> Result<UserplaneSession> {
         self.packet_processor
@@ -414,6 +431,7 @@ impl ProcedureBase for QCore {
                 self.config().five_qi,
                 self.config().pdcp_sn_length,
                 ipv4,
+                ue_dhcp_identifier,
                 logger,
             )
             .await
@@ -451,10 +469,12 @@ impl ProcedureBase for QCore {
         logger: &Logger,
     ) {
         if *self.shutting_down.lock().await {
-            debug!(
-                logger,
-                "Skipping userplane session deactivation during shutdown"
-            );
+            // On shut down, we delete rather than deactivate sessions.  This ensure that we do not leak any
+            // netlink-created Linux routing resources on a normal shutdown.  (On a SIGKILL / crash they will still
+            // be leaked, however.)
+            self.packet_processor
+                .delete_userplane_session(session, logger)
+                .await;
             return;
         }
 

@@ -1,16 +1,17 @@
 //! main - starts a single-instance combined CU-CP and CU-UP
 
 #![allow(unused_parens)]
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 use async_std::channel::Sender;
 use async_std::prelude::*;
 use clap::Parser;
 use qcore::{
-    AmfIds, Config, NetworkDisplayName, PdcpSequenceNumberLength, PlmnIdentity, QCore, SubscriberDb,
+    AmfIds, Config, NetworkDisplayName, PdcpSequenceNumberLength, PlmnIdentity, QCore,
+    SubscriberDb, UeIpAllocationConfig,
 };
 use signal_hook::consts::signal::*;
 use signal_hook_async_std::Signals;
-use slog::{Drain, Logger, o};
+use slog::{Drain, Logger, o, warn};
 use std::net::{IpAddr, Ipv4Addr};
 
 #[derive(Parser, Debug)]
@@ -33,7 +34,7 @@ struct Args {
     mnc: String,
 
     /// Name of the Linux Ethernet device on which uplink packets from UEs will arrive via the DU or gNB.  
-    /// If you are running the gNB /DU locally, this should be set to "lo".
+    /// If you are running the gNB/DU locally, this should be set to "lo".
     #[arg(long, default_value = "eth0")]
     ran_interface_name: String,
 
@@ -45,8 +46,19 @@ struct Args {
     #[arg(long, default_value = "qcoretun")]
     tun_interface_name: String,
 
-    /// UE subnet.  This is the network address of a /24 IPv4 subnet in dotted demical notation.  
-    /// The final byte must be 0.  UEs are allocated host numbers 2-254.
+    /// Whether to use DHCP to obtain UE IP addresses.
+    #[arg(long, default_value_t = false)]
+    use_dhcp: bool,
+
+    // TODO - use same model for RAN interface
+    /// Name of the Linux Ethernet device that connects to the LAN on which UEs should appear.  This is
+    /// only used if use-dhcp is true.  If unspecified, this will be set to whatever interface is index 2
+    /// in `ip link show` (often eth0).
+    #[arg(long)]
+    lan_interface_name: Option<String>,
+
+    /// UE subnet.  Only relevant if use-dhcp is false.  This is the network address of a /24 IPv4
+    /// subnet in dotted demical notation.  The final byte must be 0.  UEs are allocated host numbers 2-254.
     #[arg(long, default_value_t = Ipv4Addr::new(10,255,0,0))]
     ue_subnet: Ipv4Addr,
 
@@ -88,12 +100,24 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let (plmn, serving_network_name) = convert_mcc_mnc(&args.mcc, &args.mnc).unwrap();
-    check_ue_subnet(&args.ue_subnet)?;
     check_local_ip(&args.local_ip)?;
 
     let sub_db = SubscriberDb::new_from_sim_file(&args.sim_cred_file, &logger)?;
 
-    let _qc = QCore::start(
+    let ip_allocation_method = if args.use_dhcp {
+        let lan_if_index = if let Some(lan_interface_name) = args.lan_interface_name {
+            qcore::get_if_index(&lan_interface_name)?
+        } else {
+            2
+        };
+
+        // The 'None' here means that QCore will broadcast its DHCP requests.
+        UeIpAllocationConfig::Dhcp(lan_if_index, None)
+    } else {
+        check_ue_subnet(&args.ue_subnet)?;
+        UeIpAllocationConfig::RoutedUeSubnet(args.ue_subnet)
+    };
+    let qc = QCore::start(
         Config {
             ip_addr: args.local_ip,
             plmn: PlmnIdentity(plmn),
@@ -105,7 +129,6 @@ async fn main() -> Result<()> {
             ran_interface_name: args.ran_interface_name,
             n6_interface_name: args.n6_interface_name,
             tun_interface_name: args.tun_interface_name,
-            ue_subnet: args.ue_subnet,
             pdcp_sn_length: if args.pdcp_12bit_sn {
                 PdcpSequenceNumberLength::TwelveBits
             } else {
@@ -113,14 +136,21 @@ async fn main() -> Result<()> {
             },
             five_qi: args.five_qi,
             network_display_name: NetworkDisplayName::new(&args.network_display_name)?,
+            ip_allocation_method,
         },
-        logger,
+        logger.clone(),
         sub_db,
         !args.f1_mode,
         args.userplane_stats,
     )
     .await?;
 
+    if args.use_dhcp {
+        if let Err(e) = (*qc).test_dhcp().await {
+            warn!(logger, "DHCP self test failed - {:#}", e);
+            bail!("Self test failure");
+        }
+    }
     wait_for_signal().await?;
 
     Ok(())
