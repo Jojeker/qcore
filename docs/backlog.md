@@ -1,8 +1,6 @@
 # Backlog
 
 ## In progress
--  UEs on LAN
-   -  self-review / todos
 -  Clustering
 -  Is this a better design model for test UEs?: https://docs.rs/rtnetlink/latest/rtnetlink/struct.RouteMessageBuilder.html
 
@@ -15,13 +13,12 @@
 - OAI test broken - simulated UE doesn't send Configuration Update Complete
 
 ## Performance
+- Do not put XDP programs in SKB mode.  (But this causes 15s interruption to NIC - avoid having QCore attach/detach and do separately?)
 - iperf framework
 - push to 1000 UEs
 - Reduce memcpy?
 
 ## Usability
-- Reduce number of mandatory command line arguments (e.g. derive IP address from interface, derive MNC/MCC from sims.toml)
-- flip use-dhcp default?
 
 ## Function gaps
 - Implement and test NAS procedure interaction table

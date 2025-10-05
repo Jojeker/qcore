@@ -41,13 +41,13 @@ type EthIndexLookupTable = Array<MapData, u16>;
 type InterfaceIndices = Vec<u32>;
 
 impl PacketProcessor {
-    pub fn install_ebpf(
+    pub async fn install_ebpf(
         ngap_mode: bool,
         local_ip: IpAddr,
         ran_if_name: &str,
         n6_if_name: &str,
         tun_if_name: &str,
-        logger: &Logger,
+        _logger: &Logger,
     ) -> Result<(Ebpf, InterfaceIndices)> {
         let gtpu_local_ipv4 = match local_ip {
             IpAddr::V4(addr) => addr.octets(),
@@ -89,7 +89,7 @@ impl PacketProcessor {
         // XDP uplink program.
         let program: &mut Xdp = ebpf.program_mut(uplink_program).unwrap().try_into()?;
         program.load()?;
-        program.attach(ran_if_name, XdpFlags::default())?;
+        program.attach(ran_if_name, XdpFlags::SKB_MODE)?;
 
         // TC uplink redirect program.   The XDP uplink program passes IP packets through to this.
         let _ = tc::qdisc_add_clsact(ran_if_name);
@@ -139,14 +139,30 @@ impl PacketProcessor {
             .try_into()?;
         xdp_downlink_eth_program.load()?;
         for if_index in &ethernet_session_if_indices {
-            xdp_downlink_eth_program.attach_to_if_index(*if_index, XdpFlags::default())?;
+            xdp_downlink_eth_program.attach_to_if_index(*if_index, XdpFlags::SKB_MODE)?;
         }
 
-        info!(
-            logger,
-            "Found {} ethernet devices to use for Ethernet PDU sessions",
-            ethernet_session_if_indices.len()
-        );
+        // XdpFlags::SKB_MODE is a slow way of using XDP, but it avoids resetting the network device on
+        // attach.
+        //
+        // This code was an attempt to cope with a network device reset, but was not sufficient.  Even
+        // after the loop exited, IP connectivity was still down for a further 10s.
+        //
+        // Installing an XDP program may cause the interface to go down.  Wait for it to come back up.
+        // let netlink = Netlink::new(0)?;
+        // let start = Instant::now();
+        // let ran_if_index = get_if_index(ran_if_name)?;
+        // loop {
+        //     if netlink.interface_is_up(ran_if_index).await? {
+        //         break;
+        //     }
+        //     async_std::task::sleep(std::time::Duration::from_millis(500)).await;
+        // }
+        // debug!(
+        //     logger,
+        //     "{ran_if_name} took ~{:.1}s to come back up after XDP install",
+        //     start.elapsed().as_millis() as f32 / 1000.0
+        // );
 
         Ok((ebpf, ethernet_session_if_indices))
     }
@@ -179,6 +195,8 @@ impl PacketProcessor {
         let ue_network_if_index = get_if_index("veth0")?;
         let ue_ip_allocator =
             UeIpAllocator::new(ue_network_if_index, ue_ip_allocation_config, logger).await?;
+
+        info!(logger, "Ethernet PDU devices: {}", if_indices.len());
 
         Ok(PacketProcessor {
             index_pool,

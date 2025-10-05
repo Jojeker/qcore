@@ -87,12 +87,16 @@ impl QCore {
             &config.n6_interface_name,
             &config.tun_interface_name,
             &logger,
-        )?;
+        )
+        .await?;
         info!(
             &logger,
-            "Serving network name {}", config.serving_network_name
+            "Serving network name: {}", config.serving_network_name
         );
-        info!(&logger, "Supported slice SST {}", config.sst);
+        info!(
+            &logger,
+            "Slices (SST[:SD])   : {}, {}:0", config.sst, config.sst
+        );
 
         let packet_processor = PacketProcessor::new(
             config.ip_allocation_method.clone(),
@@ -135,16 +139,13 @@ impl QCore {
     }
 
     async fn run(&mut self) -> Result<()> {
-        let port = if self.ngap_mode {
-            NGAP_BIND_PORT
+        let (name, port) = if self.ngap_mode {
+            ("AMF NGAP port", NGAP_BIND_PORT)
         } else {
-            F1AP_BIND_PORT
+            ("CU F1AP port ", F1AP_BIND_PORT)
         };
         let listen_address = format!("{}:{}", self.config.ip_addr, port);
-        info!(
-            &self.logger,
-            "Listen for connection from RAN on {}", listen_address
-        );
+        info!(&self.logger, "My {}    : {}", name, listen_address);
 
         let handle = if self.ngap_mode {
             self.stack
@@ -236,7 +237,7 @@ impl QCore {
             .dhcp_self_test(&self.logger)
             .await?;
 
-        info!(self.logger, "DHCP self test Ok");
+        info!(self.logger, "DHCP self test      : Ok");
 
         Ok(())
     }

@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use async_std::stream::StreamExt;
 use rtnetlink::{
     Handle, RouteMessageBuilder, new_connection_with_socket,
@@ -29,36 +29,45 @@ impl Netlink {
         })
     }
 
-    pub async fn get_link_addr_info(&self, if_index: u32) -> Result<(Ipv4Addr, [u8; 6])> {
-        let Some(link_info) = self
+    // Kept around in case it proves useful in future.
+    //
+    // pub async fn interface_is_up(&self, if_index: u32) -> Result<bool> {
+    //     let link = self.get_link(if_index).await?;
+
+    //     for attr in link.attributes {
+    //         if let LinkAttribute::OperState(state) = attr {
+    //             return Ok(if let State::Up = state { true } else { false });
+    //         }
+    //     }
+
+    //     // In the absence of an oper state attribute, use the link flag.
+    //     Ok((link.header.flags & LinkFlags::Up) == LinkFlags::Up)
+    // }
+
+    pub async fn get_if_name_from_ipv4(&self, addr: &Ipv4Addr) -> Option<String> {
+        let mut interfaces = self
             .netlink_handle
             .link()
             .get()
-            .match_index(if_index)
-            .execute()
-            .next()
-            .await
-        else {
-            bail!("Couldn't retrieve link info for if index {if_index}")
-        };
-        let mut mac = None;
-        match link_info {
-            Err(e) => bail!("Netlink error {e} getting link info for if index {if_index}"),
-            Ok(LinkMessage { attributes, .. }) => {
-                for attr in attributes.iter() {
-                    if let LinkAttribute::Address(addr) = attr {
-                        mac = Some(addr.clone());
+            .set_filter_mask(AddressFamily::Inet, vec![])
+            .execute();
+
+        while let Some(Ok(interface)) = interfaces.next().await {
+            if let Ok(ipv4) = self.first_ipv4_address_of(interface.header.index).await {
+                if ipv4 == *addr {
+                    for attr in interface.attributes {
+                        if let LinkAttribute::IfName(name) = attr {
+                            return Some(name);
+                        }
                     }
+                    break;
                 }
             }
-        };
-        let Some(mac) = mac else {
-            bail!("Couldn't find MAC address on inteface index {}", if_index);
-        };
-        let Ok(mac) = mac.try_into() else {
-            bail!("Interface hardware address isn't 6 bytes");
-        };
+        }
+        None
+    }
 
+    async fn first_ipv4_address_of(&self, if_index: u32) -> Result<Ipv4Addr> {
         let mut address_stream = self
             .netlink_handle
             .address()
@@ -87,6 +96,41 @@ impl Netlink {
         let Some(ipv4) = ipv4 else {
             bail!("Couldn't find IPv4 address on interface index {}", if_index);
         };
+        Ok(ipv4)
+    }
+
+    async fn get_link(&self, if_index: u32) -> Result<LinkMessage> {
+        Ok(self
+            .netlink_handle
+            .link()
+            .get()
+            .match_index(if_index)
+            .execute()
+            .next()
+            .await
+            .ok_or(anyhow!("Not found"))??)
+    }
+
+    pub async fn get_link_addr_info(&self, if_index: u32) -> Result<(Ipv4Addr, [u8; 6])> {
+        let mut mac = None;
+        match self.get_link(if_index).await {
+            Err(e) => bail!("Error {e} getting link info for if index {if_index}"),
+            Ok(LinkMessage { attributes, .. }) => {
+                for attr in attributes.iter() {
+                    if let LinkAttribute::Address(addr) = attr {
+                        mac = Some(addr.clone());
+                    }
+                }
+            }
+        };
+        let Some(mac) = mac else {
+            bail!("Couldn't find MAC address on inteface index {}", if_index);
+        };
+        let Ok(mac) = mac.try_into() else {
+            bail!("Interface hardware address isn't 6 bytes");
+        };
+
+        let ipv4 = self.first_ipv4_address_of(if_index).await?;
 
         Ok((ipv4, mac))
     }
