@@ -12,7 +12,7 @@ async fn dhcp_session() -> anyhow::Result<()> {
     // The 10.255.0.1 address is currently hardcoded in the test framework but could easily be made configurable.
     // The address 10.255.0.200 will be found programmatically by QCore when it queries netlink for the IP address of veth2.
     let (gnb, qc, dn, builder, _logger) = TestFrameworkBuilder::<MockGnb>::new()
-        .use_dhcp("veth2")
+        .use_dhcp()
         .build()
         .await?;
     let dhcp_server = dn.dhcp_server();
@@ -25,8 +25,7 @@ async fn dhcp_session() -> anyhow::Result<()> {
     dhcp_server
         .hand_out_address(ue_addr, dhcp_lease_time_secs)
         .await?;
-    gnb.handle_pdu_session_resource_setup(ue.gnb_ue_context())
-        .await?;
+    gnb.handle_pdu_session_resource_setup(&mut ue).await?;
     ue.receive_nas_session_accept().await?;
     wait_until_idle(&qc).await?;
 

@@ -25,26 +25,28 @@ impl UeIpAllocator {
         config: UeIpAllocationConfig,
         logger: &Logger,
     ) -> Result<Self> {
-        let netlink = Netlink::new(ue_network_if_index)?;
-
         let mode = match config {
             UeIpAllocationConfig::RoutedUeSubnet(subnet) => {
                 info!(
                     logger,
                     "IP allocation model : Self-managed on {}/24", subnet
                 );
+
                 UeIpAllocationMode::RoutedUeSubnet(subnet)
             }
-            UeIpAllocationConfig::Dhcp(if_index, server) => {
+            UeIpAllocationConfig::Dhcp(config) => {
                 info!(
                     logger,
-                    "IP allocation model : DHCP on LAN over if index {}", if_index
+                    "IP allocation model : DHCP on LAN over interface {}", config.local_ip
                 );
-                let (ip, mac) = netlink.get_link_addr_info(if_index).await?;
-                let dhcp_client = DhcpClient::new(mac, ip, server, logger).await?;
+
+                let dhcp_client = DhcpClient::new(&config, logger).await?;
                 UeIpAllocationMode::Dhcp(Arc::new(dhcp_client))
             }
         };
+
+        let netlink = Netlink::new(ue_network_if_index)?;
+
         Ok(Self {
             netlink_route_programmer: netlink,
             mode,

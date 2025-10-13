@@ -8,7 +8,6 @@ use oxirush_nas::{
     NasPduSessionType,
     messages::{Nas5gsmHeader, NasPduSessionEstablishmentRequest},
 };
-use xxap::Snssai;
 
 impl<'a, B: NasBase> NasProcedure<'a, B> {
     pub async fn session_establishment(
@@ -57,7 +56,8 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
 
         let mut session = PduSession {
             id: hdr.pdu_session_identity,
-            snssai: Snssai(self.api.config().sst, Some([0, 0, 0])),
+            sst: self.api.config().sst,
+            sd: Some([0, 0, 0]),
             userplane,
             dnn: dnn.unwrap_or(b"internet".to_vec()),
         };
@@ -72,6 +72,7 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
         let accept = self.ue.nas.encode_dl(accept)?;
         self.api.ran_session_setup(&mut session, accept).await?;
         self.ue.pdu_sessions.push(session);
+        self.replicate().await;
 
         Ok(())
     }

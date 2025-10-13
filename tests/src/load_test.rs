@@ -1,7 +1,7 @@
 use crate::{MockGnb, UeBuilder};
 use anyhow::Result;
 use qcore::{SimCreds, Sqn, Subscriber, SubscriberDb};
-use slog::Logger;
+use slog::{Logger, o};
 use std::{collections::HashMap, net::IpAddr};
 
 pub fn generate_load_test_sims(count: usize) -> SubscriberDb {
@@ -24,7 +24,7 @@ pub fn generate_load_test_sims(count: usize) -> SubscriberDb {
 
 pub async fn load_test(amf_ip: IpAddr, sims: SubscriberDb, logger: Logger) -> Result<()> {
     let gnb_ip = "127.0.0.2";
-    let mut gnb = MockGnb::new(gnb_ip, &logger).await?;
+    let mut gnb = MockGnb::new(gnb_ip, logger.new(o!("gnb" => 1))).await?;
     gnb.perform_ng_setup(&amf_ip).await?;
 
     let ue_count = sims.0.len();
@@ -45,28 +45,26 @@ pub async fn load_test(amf_ip: IpAddr, sims: SubscriberDb, logger: Logger) -> Re
             let mut ue = builder.ngap_ue(&gnb).with_session().await?;
 
             // Context release = 3 messages.
-            gnb.send_ue_context_release_request(ue.gnb_ue_context())
-                .await?;
-            gnb.handle_ue_context_release(ue.gnb_ue_context()).await?;
+            gnb.send_ue_context_release_request(&ue).await?;
+            gnb.handle_ue_context_release(&mut ue).await?;
 
-            let _old_ue_context = gnb.reset_ue_context(ue.gnb_ue_context(), &amf_ip).await?;
+            let _old_ue_context = gnb.reset_ue_context(&mut ue, &amf_ip).await?;
 
             // Service procedure = 3 messages.
             // (The NAS service accept is piggybacked on the initial context setup.)
             ue.send_nas_service_request().await?;
-            gnb.handle_initial_context_setup_with_session(ue.gnb_ue_context())
+            gnb.handle_initial_context_setup_with_session(&mut ue)
                 .await?;
             ue.receive_nas_service_accept().await?;
 
             // Session release = 4 messages.
             ue.send_nas_pdu_session_release_request().await?;
-            gnb.handle_pdu_session_resource_release(ue.gnb_ue_context())
-                .await?;
+            gnb.handle_pdu_session_resource_release(&mut ue).await?;
             ue.handle_nas_session_release().await?;
 
             // Deregistration = 4 messages.
             ue.perform_nas_deregistration().await?;
-            gnb.handle_ue_context_release(ue.gnb_ue_context()).await?;
+            gnb.handle_ue_context_release(&ue).await?;
         }
         run_id += 1;
         if now.elapsed().as_secs() > RUN_DURATION_SECS as u64 {

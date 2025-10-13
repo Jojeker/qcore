@@ -1,8 +1,22 @@
 # Backlog
 
 ## In progress
+-  Interop testing bugs
+   -  Received an ngReset (when we Ctrl-C the gNB) - unhandled
+   -  Log DHCP server IP
+   -  6 debug logs with "unknown TMSI" when we look in both the outer and inner message
+   -  If a phone disconnects and reconnects (toggle mobile radio power), we get errors 
+      -  "Lease already existed for" and "Carry on after netlink error..."
+         -  It is setting up a new session and DHCP is giving it the same address.
+      -  We did not clean up the session on UE Deregistration
+   -  UE is still using its TMSI after deregistration to reregister
+   -  "WARN Identity peek not implemented for message type on Service Request"
+   -  "WARN Unsupported PduSessionType 011" log - actuallly this is IpV4V6
+      -  meanwhile IPv6 case should say "UE asked for IPv6 - please change it to IPv4"
+
 -  Clustering
--  Is this a better design model for test UEs?: https://docs.rs/rtnetlink/latest/rtnetlink/struct.RouteMessageBuilder.html
+   -  Get two_qcores test working, review new warnings + todos
+   -  Test connection with catchup, disconnection and reconnection, session deletion, deregistration
 
 ## Persistence
 - Paging continuity
@@ -64,6 +78,7 @@
   its session setup request (with no intervening delete) after not liking the response.
 
 ## Code cleanliness + refactoring
+-  Is this a better design model for test UEs?: https://docs.rs/rtnetlink/latest/rtnetlink/struct.RouteMessageBuilder.html
 - switch to tokio or smol
 - commonize downlink xdp and tc, or reimplement downlink tc logic in a new xdp program
 - review Arc / clone usage

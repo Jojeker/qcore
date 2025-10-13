@@ -1,11 +1,13 @@
 use super::subscriber_db::SubscriberDb;
 use super::userplane::{DownlinkBufferController, PacketProcessor, PagingApi};
+use crate::cluster::{ClusterMember, ReplicationHandler};
 use crate::data::{Ipv4SessionParams, Payload, UePagingInfo};
 use crate::f1ap::{F1AP_BIND_PORT, F1AP_SCTP_PPID};
 use crate::ngap::{NGAP_BIND_PORT, NGAP_SCTP_PPID};
 use crate::procedures::{F1apHandler, NgapHandler, UeMessage, UeMessageHandler};
 use crate::protocols::nas::Tmsi;
 use crate::protocols::ngap::build::paging;
+use crate::userplane::EbpfStartupData;
 use crate::{Config, ProcedureBase, Sqn, SubscriberAuthParams, UeContext5GC, UserplaneSession};
 use anyhow::{Result, anyhow, bail};
 use async_std::task::JoinHandle;
@@ -15,7 +17,6 @@ use async_std::{
     task::block_on,
 };
 use async_trait::async_trait;
-use aya::Ebpf;
 use f1ap::GnbDuServedCellsItem;
 use ngap::{FiveGTmsi, Tac};
 use slog::{Logger, debug, info, o, warn};
@@ -47,6 +48,7 @@ pub struct QCore {
     ngap_mode: bool,
     shutting_down: Arc<Mutex<bool>>,
     downlink_buffer_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    cluster_member: Option<ClusterMember>,
 }
 
 enum CoreContextLocator {
@@ -55,7 +57,7 @@ enum CoreContextLocator {
 }
 
 pub struct ProgramHandle {
-    _ebpf: Ebpf,
+    _ebpf: EbpfStartupData,
     qc: Box<QCore>,
 }
 impl Deref for ProgramHandle {
@@ -79,16 +81,38 @@ impl QCore {
         ngap_mode: bool,
         userplane_stats: bool,
     ) -> Result<ProgramHandle> {
-        let local_ip = config.ip_addr;
-        let (mut ebpf, veths) = PacketProcessor::install_ebpf(
+        let ebpf = PacketProcessor::install_ebpf(
             ngap_mode,
-            local_ip,
+            config.ip_addr,
             &config.ran_interface_name,
             &config.n6_interface_name,
             &config.tun_interface_name,
             &logger,
         )
         .await?;
+
+        Self::start_common(config, ebpf, logger, sub_db, ngap_mode, userplane_stats).await
+    }
+
+    pub async fn start_second_instance_with_ebpf_reuse(
+        config: Config,
+        logger: Logger,
+        sub_db: SubscriberDb,
+        ngap_mode: bool,
+        userplane_stats: bool,
+    ) -> Result<ProgramHandle> {
+        let ebpf = PacketProcessor::reuse_ebpf()?;
+        Self::start_common(config, ebpf, logger, sub_db, ngap_mode, userplane_stats).await
+    }
+
+    async fn start_common(
+        config: Config,
+        mut ebpf: EbpfStartupData,
+        logger: Logger,
+        sub_db: SubscriberDb,
+        ngap_mode: bool,
+        userplane_stats: bool,
+    ) -> Result<ProgramHandle> {
         info!(
             &logger,
             "Serving network name: {}", config.serving_network_name
@@ -102,7 +126,6 @@ impl QCore {
             config.ip_allocation_method.clone(),
             &mut ebpf,
             userplane_stats,
-            veths,
             &logger,
         )
         .await?;
@@ -121,6 +144,12 @@ impl QCore {
         ngap_mode: bool,
     ) -> Result<Self> {
         let tun_interface_name = config.tun_interface_name.clone();
+        let cluster_member = if let Some(cluster_config) = &config.cluster_config {
+            Some(ClusterMember::new(cluster_config, &logger).await?)
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             stack: Stack::new(SctpTransportProvider::new()),
@@ -135,6 +164,7 @@ impl QCore {
             ngap_mode,
             shutting_down: Arc::new(Mutex::new(false)),
             downlink_buffer_handle: Arc::new(Mutex::new(None)),
+            cluster_member,
         })
     }
 
@@ -146,6 +176,11 @@ impl QCore {
         };
         let listen_address = format!("{}:{}", self.config.ip_addr, port);
         info!(&self.logger, "My {}    : {}", name, listen_address);
+
+        let self_ref = Arc::new(self.clone());
+        if let Some(cluster_member) = &self.cluster_member {
+            cluster_member.handle(self_ref, &self.logger).await?;
+        }
 
         let handle = if self.ngap_mode {
             self.stack
@@ -348,6 +383,18 @@ impl ProcedureBase for QCore {
             .await
     }
 
+    async fn replicate_ue_context(&self, cxt: &UeContext5GC, logger: &Logger) {
+        // TODO - this should spawn a task to avoid slowing down the UE procedure in the case
+        // of a slow replication connection.
+        // TODO - if replicate_ue_context is called twice for the same UE context (TMSI?  IMSI?)
+        // and the first version has not yet been transmitted, we should skip it and just send
+        // the latest version.
+        // TODO - should we send a 'delete TMSI'?
+        if let Some(cluster_member) = &self.cluster_member {
+            let _ = cluster_member.replicate_ue_context(cxt, logger).await;
+        }
+    }
+
     async fn register_new_tmsi(&self, ue_id: u32, logger: &Logger) -> [u8; 4] {
         let mut tmsi;
         loop {
@@ -500,5 +547,19 @@ impl ProcedureBase for QCore {
                 "Ethernet session downlink buffering not yet implemented"
             );
         }
+    }
+}
+
+impl ReplicationHandler for Arc<QCore> {
+    async fn store_replicated_ue_context(&self, c: UeContext5GC) {
+        if let Some(tmsi) = &c.tmsi {
+            self.put_core_context(tmsi.0.clone(), 0, c, 10, &self.logger)
+                .await;
+        }
+    }
+
+    fn new_receiver(&self) {
+        // TODO - catchup replication
+        debug!(self.logger, "Catchup replication not yet implelmented")
     }
 }

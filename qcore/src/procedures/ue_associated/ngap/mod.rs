@@ -96,7 +96,9 @@ impl<'a, B: RanUeBase> NgapUeProcedure<'a, B> {
                 .dl_qos_flow_per_tnl_information
                 .up_transport_layer_information;
 
-        session.userplane.remote_tunnel_info = Some(gtp_tunnel);
+        session.userplane.remote_ip = Some(gtp_tunnel.transport_layer_address.try_into()?);
+        session.userplane.remote_teid = Some(gtp_tunnel.gtp_teid.0);
+
         self.api
             .commit_userplane_session(&session.userplane, &self.logger)
             .await
@@ -122,6 +124,7 @@ impl<'a, B: RanUeBase> NasBase for &mut NgapUeProcedure<'a, B> {
             );
             async fn register_new_tmsi(&self, [self.ue.local_ran_ue_id], [&self.logger]) -> [u8;4];
             async fn delete_tmsi(&self, tmsi: [u8; 4]);
+            async fn replicate_ue_context(&self, cxt: &UeContext5GC, [&self.logger]);
     }}
 
     fn disconnect_ue(&mut self) {
