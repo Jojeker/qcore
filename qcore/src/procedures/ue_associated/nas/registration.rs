@@ -201,6 +201,7 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
 
         // TS33.501, 6.7.2: AMF starts integrity protection before transmitting SecurityModeCommand.
         let knasint = security::derive_knasint(&self.ue.kamf);
+        warn!(self.logger, "KNASINT: {knasint:?}");
         self.ue.nas.enable_security(knasint);
         self.security_mode().await
     }

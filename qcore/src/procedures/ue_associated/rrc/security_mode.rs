@@ -30,6 +30,7 @@ impl<'a, B: RrcBase> RrcProcedure<'a, B> {
 
     fn configure_rrc_security(&mut self, kgnb: &[u8; 32]) {
         let krrcint = security::derive_krrcint(kgnb);
+        println!("KRRCINT {krrcint:?}");
 
         // Tell the PDCP layer to add NIA2 integrity protection henceforth.
         self.ue.pdcp_tx.enable_security(krrcint);

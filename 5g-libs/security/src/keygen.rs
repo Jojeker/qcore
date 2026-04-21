@@ -56,6 +56,7 @@ pub fn generate_challenge(
     kausf.update(&autn[0..6]); // P1 = SQN ^ AK
     kausf.update(&[0x00, 0x06]); // L1
     let kausf: [u8; 32] = kausf.finalize().into_bytes().into();
+    println!("KAUSF:        {:02x?}", kausf);
 
     // KSEAF - TS33.501, Annex A.6, using key definition function from TS33.220, B.2.0.
     let mut kseaf = HmacSha256::new_from_slice(&kausf).expect("Can't fail");
