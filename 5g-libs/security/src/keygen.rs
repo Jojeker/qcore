@@ -57,6 +57,10 @@ pub fn generate_challenge(
     kausf.update(&[0x00, 0x06]); // L1
     let kausf: [u8; 32] = kausf.finalize().into_bytes().into();
     println!("KAUSF:        {:02x?}", kausf);
+    println!("CK   :        {:02x?}", ck);
+    println!("IK   :        {:02x?}", ik);
+    println!("AK   :        {:02x?}", ak);
+    println!("SQN   :        {:02x?}", sqn);
 
     // KSEAF - TS33.501, Annex A.6, using key definition function from TS33.220, B.2.0.
     let mut kseaf = HmacSha256::new_from_slice(&kausf).expect("Can't fail");
