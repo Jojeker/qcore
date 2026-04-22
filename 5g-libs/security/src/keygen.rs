@@ -22,8 +22,11 @@ pub fn generate_challenge(
     // TS33.501, section 6.1.3.2.0
 
     // RAND
-    let mut rand = [0u8; 16];
-    rand::rng().fill_bytes(&mut rand);
+    // fix it for testing OTA
+    let mut rand = [
+        0xd7, 0x33, 0x11, 0x6a, 0x94, 0xd5, 0xe8, 0x3a,
+        0x1f, 0x6a, 0xd0, 0x3d, 0xa1, 0x5f, 0x91, 0x12,
+    ];
 
     // Serving network name length as a two byte KDF input parameter.
     let serving_network_name_len_for_kdf = (serving_network_name.len() as u16).to_be_bytes();
@@ -91,7 +94,7 @@ pub fn generate_challenge(
     // println!("rand:     {:02x?}", rand);
     // println!("autn:     {:02x?}", autn);
     // println!("xresstar: {:02x?}", xres_star);
-    // println!("kseaf:    {:02x?}", kseaf);
+    println!("kseaf:    {:02x?}", kseaf);
 
     Challenge {
         rand,
