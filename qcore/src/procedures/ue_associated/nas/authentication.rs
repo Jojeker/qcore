@@ -149,7 +149,7 @@ impl<'a, B: NasBase> NasProcedure<'a, B> {
         println!("SQN for challenge: {:02x?}", auth_params.sqn);
 
         // Generate a new KSI for each challenge.
-        // self.ue.ksi.inc();
+        self.ue.ksi.inc();
 
         let challenge = security::generate_challenge(
             &auth_params.sim_creds.ki,
