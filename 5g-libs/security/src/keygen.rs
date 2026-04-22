@@ -91,7 +91,7 @@ pub fn generate_challenge(
     // println!("K:        {:02x?}", k);
     // println!("OPC:      {:02x?}", opc);
     // println!("serving network name: {:02x?}", serving_network_name);
-    // println!("rand:     {:02x?}", rand);
+    println!("rand:     {:02x?}", rand);
     // println!("autn:     {:02x?}", autn);
     // println!("xresstar: {:02x?}", xres_star);
     println!("kseaf:    {:02x?}", kseaf);
